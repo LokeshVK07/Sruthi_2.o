@@ -6,7 +6,7 @@ on:
       full_refresh:
         description: Run a full catalog refresh instead of incremental mode
         required: false
-        default: false
+        default: true
         type: boolean
   schedule:
     - cron: "17 */6 * * *"
@@ -78,9 +78,9 @@ jobs:
       - name: Resolve run mode
         run: |
           set -euo pipefail
-          full_refresh="false"
-          if [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" && "${{ inputs.full_refresh }}" == "true" ]]; then
-            full_refresh="true"
+          full_refresh="true"
+          if [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" && "${{ inputs.full_refresh }}" != "true" ]]; then
+            full_refresh="false"
           fi
           echo "VIBE_FULL_REFRESH=${full_refresh}" >> "$GITHUB_ENV"
 
