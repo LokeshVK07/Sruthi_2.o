@@ -33,7 +33,7 @@ from .repository import (
 from .scraper import site_scraper
 
 
-app = FastAPI(title="Melodify API")
+app = FastAPI(title="Vibe 2.o API")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[WEB_ORIGIN, "http://127.0.0.1:5173", "http://localhost:5173"],

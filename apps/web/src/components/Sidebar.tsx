@@ -1,5 +1,5 @@
 import type { LucideIcon } from "lucide-react";
-import { ChevronDown, Heart, Plus, Waves } from "lucide-react";
+import { ChevronDown, Heart, Plus } from "lucide-react";
 
 export type NavKey = "home" | "search" | "library" | "favorites" | "playlists" | "albums" | "artists";
 
@@ -42,11 +42,11 @@ export default function Sidebar({
     <aside className="sidebar">
       <div className="sidebar__brand">
         <div className="sidebar__logo">
-          <Waves size={20} />
+          <img src="/Icon.png" alt="Vibe 2.o" />
         </div>
         <div>
-          <strong>Sruthi – ஸ்ருதி</strong>
-          <span>Premium music dashboard</span>
+          <strong>Vibe 2.o</strong>
+          <span>Premium music player</span>
         </div>
       </div>
 

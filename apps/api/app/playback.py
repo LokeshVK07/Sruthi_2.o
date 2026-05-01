@@ -78,7 +78,7 @@ def _valid_local_cache(song_id: str) -> Path | None:
 
 def _build_upstream_headers(song, request_headers: dict[str, str], accept_encoding: str | None = "identity") -> dict[str, str]:
     headers = {
-        "user-agent": "Mozilla/5.0 Melodify/1.0",
+        "user-agent": "Mozilla/5.0 Vibe2o/1.0",
         "accept": "audio/*,*/*;q=0.8",
         "referer": song.album_url,
     }

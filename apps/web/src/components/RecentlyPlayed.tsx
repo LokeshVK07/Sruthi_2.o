@@ -5,14 +5,15 @@ type ViewMode = "grid" | "list";
 
 type RecentlyPlayedProps = {
   title: string;
-  songs: Song[];
+  tracks: Song[];
   viewMode: ViewMode;
   fallbackArt: string;
-  onSelect: (song: Song) => void;
+  currentTrackId?: string;
+  onPlayTrack: (track: Song) => void;
   onViewAll: () => void;
 };
 
-export default function RecentlyPlayed({ title, songs, viewMode, fallbackArt, onSelect, onViewAll }: RecentlyPlayedProps) {
+export default function RecentlyPlayed({ title, tracks, viewMode, fallbackArt, currentTrackId, onPlayTrack, onViewAll }: RecentlyPlayedProps) {
   return (
     <section className="content-section">
       <div className="section-header">
@@ -23,22 +24,41 @@ export default function RecentlyPlayed({ title, songs, viewMode, fallbackArt, on
         </button>
       </div>
 
-      <div className={viewMode === "grid" ? "recent-grid" : "recent-list"}>
-        {songs.map((song) => (
-          <button key={song.id} className={viewMode === "grid" ? "recent-card" : "recent-row"} onClick={() => onSelect(song)}>
-            <div className="recent-card__media">
-              <img src={song.artworkUrl || fallbackArt} alt={song.title} />
-              <span className="recent-card__play">
-                <Play size={15} />
-              </span>
-            </div>
-            <div className="recent-card__copy">
-              <strong>{song.title}</strong>
-              <span>{song.artist}</span>
-            </div>
-          </button>
-        ))}
-      </div>
+      {tracks.length ? (
+        <div className={viewMode === "grid" ? "recent-grid" : "recent-list"}>
+          {tracks.map((track) => (
+            <button
+              key={track.id}
+              type="button"
+              className={
+                viewMode === "grid"
+                  ? track.id === currentTrackId
+                    ? "recent-card is-active"
+                    : "recent-card"
+                  : track.id === currentTrackId
+                    ? "recent-row is-active"
+                    : "recent-row"
+              }
+              onClick={() => onPlayTrack(track)}
+            >
+              <div className="recent-card__media">
+                <img src={track.artworkUrl || fallbackArt} alt={track.title} />
+                <span className="recent-card__play" aria-hidden="true">
+                  <Play size={15} />
+                </span>
+              </div>
+              <div className="recent-card__action">
+                <div className="recent-card__copy">
+                  <strong title={track.title}>{track.title}</strong>
+                  <span title={track.artist}>{track.artist}</span>
+                </div>
+              </div>
+            </button>
+          ))}
+        </div>
+      ) : (
+        <div className="content-section__hint">No songs played yet</div>
+      )}
     </section>
   );
 }

@@ -36,7 +36,7 @@ type NowPlayingHeroProps = {
 };
 
 function formatTime(seconds: number) {
-  if (!Number.isFinite(seconds) || seconds <= 0) return "0:00";
+  if (!Number.isFinite(seconds) || seconds <= 0) return "";
   const mins = Math.floor(seconds / 60);
   const secs = Math.floor(seconds % 60);
   return `${mins}:${String(secs).padStart(2, "0")}`;
@@ -74,7 +74,8 @@ export default function NowPlayingHero({
   onViewAlbum,
   onShare
 }: NowPlayingHeroProps) {
-  const progressPercent = duration > 0 ? Math.min(100, Math.max(0, (currentTime / duration) * 100)) : 0;
+  const resolvedDuration = Number.isFinite(duration) && duration > 0 ? duration : song?.durationSeconds ?? 0;
+  const progressPercent = resolvedDuration > 0 ? Math.min(100, Math.max(0, (currentTime / resolvedDuration) * 100)) : 0;
   const volumePercent = Math.min(100, Math.max(0, (isMuted ? 0 : volume) * 100));
 
   return (
@@ -146,18 +147,18 @@ export default function NowPlayingHero({
 
           <div className="hero__sliders">
             <div className="hero__progress">
-              <span className="hero__time">{formatTime(currentTime)}</span>
+              <span className="hero__time">{formatTime(currentTime) || "0:00"}</span>
               <input
                 type="range"
                 min={0}
-                max={Math.max(duration, 1)}
-                value={Math.min(currentTime, Math.max(duration, 1))}
+                max={Math.max(resolvedDuration, 1)}
+                value={Math.min(currentTime, Math.max(resolvedDuration, 1))}
                 onChange={(event) => onSeek(Number(event.target.value))}
                 style={{
                   background: `linear-gradient(90deg, #e056ff 0%, #ff6ee7 ${progressPercent}%, rgba(255,255,255,0.16) ${progressPercent}%, rgba(255,255,255,0.16) 100%)`
                 }}
               />
-              <span className="hero__time">{formatTime(duration)}</span>
+              <span className="hero__time">{formatTime(resolvedDuration)}</span>
             </div>
 
             <div className="hero__volume">

@@ -13,11 +13,20 @@ import type { Song } from "./types.js";
 
 type FilterKey = "all" | "tracks" | "albums" | "artists" | "playlists";
 type ViewMode = "grid" | "list";
+type PlayTrackOptions = {
+  autoPlay?: boolean;
+  addToRecent?: boolean;
+  sourceQueue?: Song[];
+};
 type UiPlaylist = {
   id: string;
   name: string;
   trackIds: string[];
 };
+
+const MAX_RECENTLY_PLAYED = 50;
+const RECENTLY_PLAYED_STORAGE_KEY = "sruthi_recently_played";
+const APP_NAME = "Vibe 2.o";
 
 const fallbackArt =
   "data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 800 800'><defs><linearGradient id='g' x1='0%' y1='0%' x2='100%' y2='100%'><stop offset='0%' stop-color='%23191343'/><stop offset='45%' stop-color='%235320bf'/><stop offset='100%' stop-color='%23e668ff'/></linearGradient></defs><rect width='800' height='800' rx='44' fill='url(%23g)'/><circle cx='602' cy='170' r='164' fill='rgba(255,255,255,0.1)'/><circle cx='208' cy='625' r='185' fill='rgba(255,255,255,0.08)'/><path d='M518 168v296c0 30-24 55-69 71-34 12-78 11-98-4-21-14-18-39 6-54 22-14 55-20 84-16V245l166-36v211c0 31-24 56-69 72-35 12-78 11-99-4-21-15-17-39 7-54 21-14 54-20 84-16V168h-12Z' fill='white' fill-opacity='.9'/></svg>";
@@ -73,29 +82,23 @@ function pickInitialSong(librarySongs: Song[]) {
   );
 }
 
-function pickRecentlyPlayed(source: Song[]) {
-  const keywords = [
-    "idhazhin oram",
-    "pavazha malli unplugged",
-    "nee paartha vizhigal",
-    "danga maari oodhari",
-    "raavana muraedaa",
-    "puttinu"
-  ];
+function isValidTrack(value: unknown): value is Song {
+  if (!value || typeof value !== "object") return false;
+  const track = value as Record<string, unknown>;
+  return (
+    typeof track.id === "string" &&
+    typeof track.title === "string" &&
+    typeof track.artist === "string" &&
+    typeof track.albumTitle === "string" &&
+    typeof track.albumId === "string" &&
+    typeof track.streamUrl === "string" &&
+    typeof track.trackNumber === "number"
+  );
+}
 
-  const matched = keywords
-    .map((keyword) => source.find((song) => formatTextSearch(song).includes(keyword)))
-    .filter(Boolean) as Song[];
-
-  if (matched.length >= 4) return matched;
-
-  const deduped = [...matched];
-  for (const song of source) {
-    if (deduped.some((item) => item.id === song.id)) continue;
-    deduped.push(song);
-    if (deduped.length >= 6) break;
-  }
-  return deduped.slice(0, 6);
+function updateRecentlyPlayedList(previous: Song[], track: Song) {
+  const withoutDuplicate = previous.filter((item) => item.id !== track.id);
+  return [track, ...withoutDuplicate].slice(0, MAX_RECENTLY_PLAYED);
 }
 
 async function safePlay(audio: HTMLAudioElement) {
@@ -103,6 +106,7 @@ async function safePlay(audio: HTMLAudioElement) {
     await audio.play();
   } catch (error) {
     if (error instanceof DOMException && error.name === "AbortError") return;
+    console.error("Audio play failed", error);
   }
 }
 
@@ -126,6 +130,8 @@ export default function App() {
   const [heroMenuOpen, setHeroMenuOpen] = useState(false);
   const [expandedSection, setExpandedSection] = useState<"favorites" | "recent" | null>(null);
   const [heroFeedback, setHeroFeedback] = useState<string | null>(null);
+  const [recentlyPlayed, setRecentlyPlayed] = useState<Song[]>([]);
+  const [recentlyPlayedHydrated, setRecentlyPlayedHydrated] = useState(false);
   const deferredQuery = useDeferredValue(searchQuery.trim());
   const warmedUpRef = useRef(false);
   const lastVolumeRef = useRef(0.82);
@@ -157,11 +163,8 @@ export default function App() {
     repeatMode,
     setQueue,
     playSong,
-    next,
-    previous,
     setPlaying,
     setVolume,
-    setCurrentIndex,
     setSongFavorite,
     clearQueue,
     moveQueueItem,
@@ -175,8 +178,16 @@ export default function App() {
   const albumItems = albums?.items ?? [];
   const fullLibrary = home?.library?.length ? home.library : librarySongs;
   const currentSong = queue[currentIndex] ?? pickInitialSong(fullLibrary);
-  const recentSongs = useMemo(() => pickRecentlyPlayed(home?.recentlyPlayed?.length ? home.recentlyPlayed : fullLibrary), [home?.recentlyPlayed, fullLibrary]);
-  const displayedRecent = recentSongs.slice(0, 6);
+  const recentSongs = useMemo(
+    () =>
+      recentlyPlayed
+        .map((track) => fullLibrary.find((song) => song.id === track.id) ?? track)
+        .slice(0, MAX_RECENTLY_PLAYED),
+    [recentlyPlayed, fullLibrary]
+  );
+  const filteredRecentSongs = useMemo(() => recentSongs.filter((song) => titleMatches(song, searchQuery)), [recentSongs, searchQuery]);
+  const filteredFavoriteSongs = useMemo(() => favoriteSongs.filter((song) => titleMatches(song, searchQuery)), [favoriteSongs, searchQuery]);
+  const displayedRecent = filteredRecentSongs.slice(0, 6);
   const selectedPlaylist = useMemo(
     () => customPlaylists.find((playlist) => playlist.id === selectedPlaylistId) ?? null,
     [customPlaylists, selectedPlaylistId]
@@ -193,6 +204,118 @@ export default function App() {
   const getDeck = (index: number) => (index === 0 ? deckARef.current : deckBRef.current);
   const getActiveDeck = () => getDeck(activeDeckIndex);
   const getInactiveDeck = () => getDeck(activeDeckIndex === 0 ? 1 : 0);
+
+  function updateRecentlyPlayed(track: Song) {
+    setRecentlyPlayed((previous) => updateRecentlyPlayedList(previous, track));
+  }
+
+  function activateSongDeck(song: Song, shouldPlay: boolean) {
+    const activeDeck = getActiveDeck();
+    const inactiveDeck = getInactiveDeck();
+    setCurrentTime(0);
+    setDuration(song.durationSeconds && song.durationSeconds > 0 ? song.durationSeconds : 0);
+    setBuffering(true);
+    if (!inactiveDeck) return;
+
+    const nextDeckIndex = activeDeckIndex === 0 ? 1 : 0;
+    inactiveDeck.pause();
+    inactiveDeck.dataset.songId = song.id;
+    inactiveDeck.src = songStreamUrl(song);
+    inactiveDeck.preload = "auto";
+    inactiveDeck.currentTime = 0;
+    inactiveDeck.muted = isMuted;
+    inactiveDeck.volume = isMuted ? 0 : volume;
+    inactiveDeck.load();
+
+    if (activeDeck) {
+      activeDeck.pause();
+      activeDeck.currentTime = 0;
+      activeDeck.muted = true;
+      activeDeck.volume = 0;
+    }
+
+    setActiveDeckIndex(nextDeckIndex);
+
+    if (shouldPlay) {
+      void safePlay(inactiveDeck);
+      recordPlayback.mutate(song.id);
+      prefetchRelated.mutate(song.id);
+    }
+  }
+
+  function playTrack(track: Song, options: PlayTrackOptions = {}) {
+    if (!track?.id) return;
+    const autoPlay = options.autoPlay ?? true;
+    const addToRecent = options.addToRecent ?? true;
+    const scopedQueue =
+      options.sourceQueue?.length
+        ? options.sourceQueue
+        : queue.length
+          ? queue.some((item) => item.id === track.id)
+            ? queue
+            : [track, ...queue]
+          : [track];
+
+    activateSongDeck(track, autoPlay);
+    playSong(track, scopedQueue);
+    if (addToRecent) {
+      updateRecentlyPlayed(track);
+    }
+    setHeroMenuOpen(false);
+  }
+
+  function getNextTrack() {
+    if (!queue.length || currentIndex < 0) return null;
+    if (repeatMode === "one") return queue[currentIndex] ?? null;
+    if (shuffle && queue.length > 1) {
+      const candidates = queue.filter((_, index) => index !== currentIndex);
+      return candidates[Math.floor(Math.random() * candidates.length)] ?? null;
+    }
+    if (currentIndex < queue.length - 1) return queue[currentIndex + 1] ?? null;
+    if (repeatMode === "all") return queue[0] ?? null;
+    return null;
+  }
+
+  function getPreviousTrack() {
+    if (!queue.length || currentIndex < 0) return null;
+    if (currentIndex > 0) return queue[currentIndex - 1] ?? null;
+    if (repeatMode === "all") return queue[queue.length - 1] ?? null;
+    return queue[currentIndex] ?? null;
+  }
+
+  function handlePlayPauseToggle() {
+    const activeDeck = getActiveDeck();
+    if (!activeDeck) {
+      setPlaying(!playing);
+      return;
+    }
+    if (playing) {
+      activeDeck.pause();
+      setPlaying(false);
+      return;
+    }
+    void safePlay(activeDeck);
+    if (currentSong) {
+      recordPlayback.mutate(currentSong.id);
+      prefetchRelated.mutate(currentSong.id);
+    }
+    setPlaying(true);
+  }
+
+  function handleNextTrack() {
+    const nextTrack = getNextTrack();
+    if (!nextTrack) {
+      setPlaying(false);
+      return;
+    }
+    playTrack(nextTrack, { autoPlay: true, addToRecent: true, sourceQueue: queue });
+  }
+
+  function handlePreviousTrack() {
+    const previousTrack = getPreviousTrack();
+    if (!previousTrack) return;
+    playTrack(previousTrack, { autoPlay: true, addToRecent: true, sourceQueue: queue });
+  }
 
   const applyFavoriteState = (songId: string, active: boolean) => {
     setSongFavorite(songId, active);
@@ -257,6 +380,34 @@ export default function App() {
   const warmup = useMutation({ mutationFn: apiClient.warmup });
 
   useEffect(() => {
+    try {
+      const raw = window.localStorage.getItem(RECENTLY_PLAYED_STORAGE_KEY);
+      if (!raw) return;
+      const parsed = JSON.parse(raw);
+      if (!Array.isArray(parsed)) return;
+      const validTracks = parsed.filter(isValidTrack).slice(0, MAX_RECENTLY_PLAYED);
+      setRecentlyPlayed(validTracks);
+    } catch {
+      window.localStorage.removeItem(RECENTLY_PLAYED_STORAGE_KEY);
+    } finally {
+      setRecentlyPlayedHydrated(true);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!recentlyPlayedHydrated || recentlyPlayed.length || !home?.recentlyPlayed?.length) return;
+    setRecentlyPlayed(home.recentlyPlayed.filter(isValidTrack).slice(0, MAX_RECENTLY_PLAYED));
+  }, [recentlyPlayedHydrated, recentlyPlayed.length, home?.recentlyPlayed]);
+
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(RECENTLY_PLAYED_STORAGE_KEY, JSON.stringify(recentlyPlayed.slice(0, MAX_RECENTLY_PLAYED)));
+    } catch {
+      // ignore storage failures
+    }
+  }, [recentlyPlayed]);
+
+  useEffect(() => {
     const activeDeck = getActiveDeck();
     const inactiveDeck = getInactiveDeck();
     if (activeDeck) {
@@ -282,10 +433,11 @@ export default function App() {
 
   useEffect(() => {
     if (!currentSong) return;
-    setCurrentTime(0);
-    setDuration(safeDuration(currentSong));
-    setBuffering(true);
     const activeDeck = getActiveDeck();
+    if (deckHasSong(activeDeck, currentSong)) return;
+    setCurrentTime(0);
+    setDuration(currentSong.durationSeconds && currentSong.durationSeconds > 0 ? currentSong.durationSeconds : 0);
+    setBuffering(true);
     const inactiveDeck = getInactiveDeck();
     if (!activeDeck || !inactiveDeck) return;
 
@@ -308,8 +460,6 @@ export default function App() {
 
     if (playing) {
       void safePlay(inactiveDeck);
-      recordPlayback.mutate(currentSong.id);
-      prefetchRelated.mutate(currentSong.id);
     }
   }, [currentSong?.id]);
 
@@ -318,10 +468,6 @@ export default function App() {
     if (!activeDeck) return;
     if (playing) {
       void safePlay(activeDeck);
-      if (currentSong) {
-        recordPlayback.mutate(currentSong.id);
-        prefetchRelated.mutate(currentSong.id);
-      }
     } else {
       activeDeck.pause();
     }
@@ -395,8 +541,7 @@ export default function App() {
 
   function handleSongSelect(song: Song, sourceQueue?: Song[]) {
     const scopedQueue = sourceQueue?.length ? sourceQueue : queueFromAlbum(song.albumId, fullLibrary);
-    playSong(song, scopedQueue.length ? scopedQueue : [song]);
-    setHeroMenuOpen(false);
+    playTrack(song, { autoPlay: true, addToRecent: true, sourceQueue: scopedQueue.length ? scopedQueue : [song] });
   }
 
   function handleToggleMute() {
@@ -502,7 +647,7 @@ export default function App() {
             </button>
           </div>
           <div className={viewMode === "grid" ? "recent-grid" : "recent-list"}>
-            {favoriteSongs.map((song) => (
+            {filteredFavoriteSongs.map((song) => (
               <button key={song.id} className={viewMode === "grid" ? "recent-card" : "recent-row"} onClick={() => handleSongSelect(song, favoriteSongs)}>
                 <div className="recent-card__media">
                   <img src={song.artworkUrl || fallbackArt} alt={song.title} />
@@ -528,7 +673,7 @@ export default function App() {
             </button>
           </div>
           <div className={viewMode === "grid" ? "recent-grid" : "recent-list"}>
-            {recentSongs.map((song) => (
+            {filteredRecentSongs.map((song) => (
               <button key={song.id} className={viewMode === "grid" ? "recent-card" : "recent-row"} onClick={() => handleSongSelect(song, fullLibrary)}>
                 <div className="recent-card__media">
                   <img src={song.artworkUrl || fallbackArt} alt={song.title} />
@@ -549,10 +694,11 @@ export default function App() {
         <>
           <RecentlyPlayed
             title="Favorites"
-            songs={favoriteSongs.slice(0, 6)}
+            tracks={filteredFavoriteSongs.slice(0, 6)}
             viewMode={viewMode}
             fallbackArt={fallbackArt}
-            onSelect={(song) => handleSongSelect(song, favoriteSongs)}
+            currentTrackId={currentSong?.id}
+            onPlayTrack={(song) => handleSongSelect(song, favoriteSongs)}
             onViewAll={() => {
               setActiveNav("favorites");
               setExpandedSection("favorites");
@@ -560,10 +706,11 @@ export default function App() {
           />
           <RecentlyPlayed
             title="Recently played"
-            songs={displayedRecent}
+            tracks={displayedRecent}
             viewMode={viewMode}
             fallbackArt={fallbackArt}
-            onSelect={(song) => handleSongSelect(song, fullLibrary)}
+            currentTrackId={currentSong?.id}
+            onPlayTrack={(song) => handleSongSelect(song, fullLibrary)}
             onViewAll={() => setExpandedSection("recent")}
           />
         </>
@@ -757,7 +904,7 @@ export default function App() {
           }}
           onLoadedMetadata={(event) => {
             if (deckIndex !== activeDeckIndex) return;
-            setDuration(event.currentTarget.duration || safeDuration(currentSong));
+            setDuration(event.currentTarget.duration || currentSong?.durationSeconds || 0);
           }}
           onCanPlay={() => {
             if (deckIndex !== activeDeckIndex) return;
@@ -778,11 +925,11 @@ export default function App() {
               void safePlay(event.currentTarget);
               return;
             }
-            next();
+            handleNextTrack();
           }}
           onError={() => {
             if (deckIndex !== activeDeckIndex) return;
-            next();
+            handleNextTrack();
           }}
         />
       ))}
@@ -827,7 +974,10 @@ export default function App() {
           <button className="mobile-header__menu" onClick={() => setMobileSidebarOpen(true)} aria-label="Open sidebar">
             <Menu size={18} />
           </button>
-          <strong>Sruthi – ஸ்ருதி</strong>
+          <div className="mobile-header__brand">
+            <img src="/Icon.png" alt={APP_NAME} />
+            <strong>{APP_NAME}</strong>
+          </div>
         </div>
 
         <NowPlayingHero
@@ -842,14 +992,14 @@ export default function App() {
           isMuted={isMuted}
           volume={volume}
           currentTime={currentTime}
-          duration={duration || safeDuration(currentSong)}
+          duration={duration || currentSong?.durationSeconds || 0}
           buffering={buffering}
           menuOpen={heroMenuOpen}
           playlists={playlistSummaries}
           feedback={heroFeedback}
-          onPlayPause={() => setPlaying(!playing)}
-          onPrevious={previous}
-          onNext={next}
+          onPlayPause={handlePlayPauseToggle}
+          onPrevious={handlePreviousTrack}
+          onNext={handleNextTrack}
           onToggleShuffle={toggleShuffle}
           onCycleRepeat={cycleRepeatMode}
           onToggleFavorite={() => currentSong && toggleFavorite.mutate(currentSong.id)}
@@ -900,11 +1050,7 @@ export default function App() {
         queue={queue}
         fallbackArt={fallbackArt}
         currentSongId={currentSong?.id}
-        onPlay={(song) => {
-          const index = queue.findIndex((item) => item.id === song.id);
-          if (index >= 0) setCurrentIndex(index);
-          playSong(song, queue);
-        }}
+        onPlay={(song) => handleSongSelect(song, queue)}
         onReorder={moveQueueItem}
         onClear={handleClearQueue}
       />
