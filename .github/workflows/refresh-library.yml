@@ -1,0 +1,106 @@
+name: Refresh Library Snapshot
+
+on:
+  schedule:
+    - cron: "0 */6 * * *"
+  workflow_dispatch:
+    inputs:
+      full_scan:
+        description: "Run a full movie-index scan after the incremental refresh"
+        required: false
+        default: "false"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: refresh-library-snapshot
+  cancel-in-progress: false
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+
+      - name: Install backend dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r apps/api/requirements.txt
+
+      - name: Ensure library release exists
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view library-snapshot --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1 || \
+            gh release create library-snapshot --repo "${GITHUB_REPOSITORY}" --title "Library Snapshot" --notes "Managed library snapshot release"
+
+      - name: Prepare working database
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p "${RUNNER_TEMP}/vibe2o-refresh"
+          export SNAPSHOT_DB="${RUNNER_TEMP}/vibe2o-refresh/vibe2o-library.sqlite3"
+          if gh release download library-snapshot --repo "${GITHUB_REPOSITORY}" --pattern "vibe2o-library.sqlite3" --dir "${RUNNER_TEMP}/vibe2o-refresh" >/dev/null 2>&1; then
+            echo "Using previously published snapshot."
+          else
+            cp apps/api/data/melodify.sqlite3 "${SNAPSHOT_DB}"
+            echo "Using repository snapshot as fallback seed."
+          fi
+          echo "SNAPSHOT_DB=${SNAPSHOT_DB}" >> "${GITHUB_ENV}"
+
+      - name: Run incremental refresh
+        env:
+          DATABASE_PATH: ${{ env.SNAPSHOT_DB }}
+        working-directory: apps/api
+        run: |
+          python -m app.scripts.init_db
+          python -m app.scripts.run_scrape --incremental
+          python -m app.scripts.scrape_movie_index --incremental
+
+      - name: Run optional full scan
+        if: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.full_scan == 'true' }}
+        env:
+          DATABASE_PATH: ${{ env.SNAPSHOT_DB }}
+        working-directory: apps/api
+        run: |
+          python -m app.scripts.scrape_movie_index --full-scan
+
+      - name: Build manifest
+        env:
+          DOWNLOAD_URL: https://github.com/${{ github.repository }}/releases/download/library-snapshot/vibe2o-library.sqlite3
+        run: |
+          VERSION="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          python scripts/publish_snapshot_manifest.py \
+            --db-path "${SNAPSHOT_DB}" \
+            --manifest-path apps/api/data/library-manifest.json \
+            --download-url "${DOWNLOAD_URL}" \
+            --version "${VERSION}"
+
+      - name: Upload snapshot asset
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release upload library-snapshot "${SNAPSHOT_DB}#vibe2o-library.sqlite3" --repo "${GITHUB_REPOSITORY}" --clobber
+
+      - name: Commit manifest changes
+        run: |
+          if git diff --quiet -- apps/api/data/library-manifest.json; then
+            echo "No manifest change to commit."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add apps/api/data/library-manifest.json
+          git commit -m "chore(data): refresh library manifest"
+          git push origin HEAD:main

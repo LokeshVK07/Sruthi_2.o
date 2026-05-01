@@ -3,40 +3,14 @@ from __future__ import annotations
 import sqlite3
 import threading
 from contextlib import contextmanager
+from pathlib import Path
 
 from .config import DATABASE_PATH
 
 
 _local = threading.local()
 
-
-def get_connection() -> sqlite3.Connection:
-    conn = getattr(_local, "conn", None)
-    if conn is None:
-        conn = sqlite3.connect(str(DATABASE_PATH), detect_types=sqlite3.PARSE_DECLTYPES, isolation_level=None)
-        conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("PRAGMA foreign_keys=ON")
-        _local.conn = conn
-    return conn
-
-
-@contextmanager
-def transaction():
-    conn = get_connection()
-    try:
-        conn.execute("BEGIN IMMEDIATE")
-        yield conn
-        conn.commit()
-    except Exception:
-        conn.rollback()
-        raise
-
-
-def init_db() -> None:
-    conn = get_connection()
-    conn.executescript(
-        """
+SCHEMA_SQL = """
         CREATE TABLE IF NOT EXISTS albums (
           album_url TEXT PRIMARY KEY,
           album_id TEXT UNIQUE NOT NULL,
@@ -138,5 +112,55 @@ def init_db() -> None:
         CREATE INDEX IF NOT EXISTS idx_songs_track_name ON songs(track_name);
         CREATE INDEX IF NOT EXISTS idx_songs_updated_at ON songs(updated_at);
         CREATE INDEX IF NOT EXISTS idx_recently_played_played_at ON recently_played(played_at);
-        """
-    )
+"""
+
+
+def connect_to(path: Path) -> sqlite3.Connection:
+    conn = sqlite3.connect(str(path), detect_types=sqlite3.PARSE_DECLTYPES, isolation_level=None)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA foreign_keys=ON")
+    return conn
+
+
+def get_connection() -> sqlite3.Connection:
+    conn = getattr(_local, "conn", None)
+    if conn is None:
+        conn = connect_to(DATABASE_PATH)
+        _local.conn = conn
+    return conn
+
+
+def close_connection() -> None:
+    conn = getattr(_local, "conn", None)
+    if conn is None:
+        return
+    try:
+        conn.close()
+    finally:
+        _local.conn = None
+
+
+@contextmanager
+def transaction():
+    conn = get_connection()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        yield conn
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+
+
+def init_db() -> None:
+    conn = get_connection()
+    conn.executescript(SCHEMA_SQL)
+
+
+def init_db_path(path: Path) -> None:
+    conn = connect_to(path)
+    try:
+        conn.executescript(SCHEMA_SQL)
+    finally:
+        conn.close()

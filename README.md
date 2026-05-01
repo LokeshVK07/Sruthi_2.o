@@ -1,12 +1,13 @@
-# Sruthi
+# Vibe 2.o
 
-Sruthi is a scraper-backed Tamil music player with:
+Vibe 2.o is a scraper-backed Tamil music player with:
 
 - a Python backend in [apps/api](/Users/lokesh/Sruthi%202.o/apps/api)
 - a React frontend in [apps/web](/Users/lokesh/Sruthi%202.o/apps/web)
 - normalized album/song storage in a local SQLite database
 - backend-controlled playback through `/api/stream/:songId`
 - cache-backed streaming and on-demand album refresh when links go stale
+- a GitHub Actions produced library snapshot refresh flow
 
 ## Current stack
 
@@ -25,8 +26,11 @@ SQLite is used here because repeated album upserts and refresh writes were not s
 - [apps/api/app/scraper.py](/Users/lokesh/Sruthi%202.o/apps/api/app/scraper.py): listing and album scraper
 - [apps/api/app/repository.py](/Users/lokesh/Sruthi%202.o/apps/api/app/repository.py): normalized storage and queries
 - [apps/api/app/playback.py](/Users/lokesh/Sruthi%202.o/apps/api/app/playback.py): stream, cache, and refresh logic
+- [apps/api/app/refresh.py](/Users/lokesh/Sruthi%202.o/apps/api/app/refresh.py): background snapshot refresh consumer
 - [apps/web](/Users/lokesh/Sruthi%202.o/apps/web): custom player UI
 - [apps/server](/Users/lokesh/Sruthi%202.o/apps/server): older temporary Node backend kept only for reference
+- [.github/workflows/refresh-library.yml](/Users/lokesh/Sruthi%202.o/.github/workflows/refresh-library.yml): GitHub Actions snapshot producer
+- [scripts/publish_snapshot_manifest.py](/Users/lokesh/Sruthi%202.o/scripts/publish_snapshot_manifest.py): manifest builder
 
 ## Local setup
 
@@ -101,6 +105,75 @@ The backend stream flow is:
 7. retry once with the refreshed URL
 8. cache successful full downloads to disk
 
+## Background snapshot refresh
+
+The app now uses a producer/consumer refresh model:
+
+- GitHub Actions is the producer
+- the running FastAPI app is the consumer
+
+### Producer
+
+The workflow in [.github/workflows/refresh-library.yml](/Users/lokesh/Sruthi%202.o/.github/workflows/refresh-library.yml):
+
+- runs every 6 hours
+- supports manual trigger
+- downloads the previously published snapshot release asset when available
+- scrapes into that existing snapshot so historical shared catalog data is preserved
+- uploads the refreshed SQLite snapshot to the `library-snapshot` GitHub Release as `vibe2o-library.sqlite3`
+- rewrites [apps/api/data/library-manifest.json](/Users/lokesh/Sruthi%202.o/apps/api/data/library-manifest.json) with:
+  - `version`
+  - `updated_at`
+  - `size`
+  - `sha256`
+  - `download_url`
+- commits only the manifest update back to git
+
+### Consumer
+
+The backend refresh worker in [apps/api/app/refresh.py](/Users/lokesh/Sruthi%202.o/apps/api/app/refresh.py):
+
+- starts on backend startup when refresh is enabled
+- polls the remote manifest on the configured interval
+- skips work if the remote version matches the local version
+- downloads a new snapshot into a temp file
+- verifies size and sha256
+- verifies the SQLite snapshot with integrity checks and required table checks
+- atomically replaces the local cached snapshot file
+- merges shared catalog tables (`albums`, `songs`, `scrape_runs`) into the live SQLite database inside a transaction
+- preserves local mutable state automatically because it does not overwrite:
+  - `favorites`
+  - `playlists`
+  - `playlist_songs`
+  - `recently_played`
+  - `users`
+  - `sessions`
+  - `user_preferences`
+- keeps a backup of the live database before applying a refresh
+
+### Runtime APIs
+
+- `GET /api/refresh/status`
+- `POST /api/refresh/check`
+
+Status fields include:
+
+- `enabled`
+- `status`
+- `message`
+- `currentVersion`
+- `remoteVersion`
+- `checkedAt`
+- `updatedAt`
+- `downloadedBytes`
+- `totalBytes`
+- `error`
+
+### Frontend wiring
+
+The React app polls refresh status and exposes a manual refresh check button in the search/filter bar.
+When a new snapshot version is applied, the frontend invalidates the cached library/home/album queries and reloads the catalog without a hard app restart.
+
 ## Useful endpoints
 
 - `GET /api/health`
@@ -112,6 +185,8 @@ The backend stream flow is:
 - `GET /api/song/:songId`
 - `GET /api/search?q=...`
 - `GET /api/stream/:songId`
+- `GET /api/refresh/status`
+- `POST /api/refresh/check`
 - `POST /api/admin/scrape`
 - `POST /api/warmup`
 - `POST /api/playback/prefetch`

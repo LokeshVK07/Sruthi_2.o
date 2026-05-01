@@ -135,6 +135,7 @@ export default function App() {
   const deferredQuery = useDeferredValue(searchQuery.trim());
   const warmedUpRef = useRef(false);
   const lastVolumeRef = useRef(0.82);
+  const lastRefreshVersionRef = useRef("");
   const deckARef = useRef<HTMLAudioElement | null>(null);
   const deckBRef = useRef<HTMLAudioElement | null>(null);
   const [activeDeckIndex, setActiveDeckIndex] = useState(0);
@@ -152,6 +153,11 @@ export default function App() {
     queryKey: ["album", selectedAlbumId],
     queryFn: () => apiClient.album(selectedAlbumId ?? ""),
     enabled: Boolean(selectedAlbumId)
+  });
+  const { data: refreshStatus } = useQuery({
+    queryKey: ["refresh-status"],
+    queryFn: apiClient.refreshStatus,
+    refetchInterval: 30000,
   });
 
   const {
@@ -378,6 +384,12 @@ export default function App() {
   const prefetchRelated = useMutation({ mutationFn: (songId: string) => apiClient.prefetchRelated(songId) });
   const prefetchSongs = useMutation({ mutationFn: (songIds: string[]) => apiClient.prefetchSongs(songIds) });
   const warmup = useMutation({ mutationFn: apiClient.warmup });
+  const manualRefreshCheck = useMutation({
+    mutationFn: apiClient.refreshCheck,
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["refresh-status"] });
+    }
+  });
 
   useEffect(() => {
     try {
@@ -496,6 +508,25 @@ export default function App() {
     const timeout = window.setTimeout(() => setHeroFeedback(null), 1800);
     return () => window.clearTimeout(timeout);
   }, [heroFeedback]);
+
+  useEffect(() => {
+    const nextVersion = refreshStatus?.currentVersion ?? "";
+    if (!nextVersion) return;
+    if (!lastRefreshVersionRef.current) {
+      lastRefreshVersionRef.current = nextVersion;
+      return;
+    }
+    if (nextVersion === lastRefreshVersionRef.current) return;
+    lastRefreshVersionRef.current = nextVersion;
+    void queryClient.invalidateQueries({ queryKey: ["home"] });
+    void queryClient.invalidateQueries({ queryKey: ["songs"] });
+    void queryClient.invalidateQueries({ queryKey: ["albums"] });
+    void queryClient.invalidateQueries({ queryKey: ["favorites"] });
+    void queryClient.invalidateQueries({ queryKey: ["search"] });
+    if (selectedAlbumId) {
+      void queryClient.invalidateQueries({ queryKey: ["album", selectedAlbumId] });
+    }
+  }, [refreshStatus?.currentVersion, selectedAlbumId]);
 
   const orchestraLine =
     currentSong?.title.toLowerCase().includes("a life full of love theme") ? "The Chennai Strings Orchestra" : currentSong?.composer || "Studio Orchestra";
@@ -1031,6 +1062,8 @@ export default function App() {
           selectedFilter={selectedFilter}
           viewMode={viewMode}
           filterOpen={filterOpen}
+          refreshState={refreshStatus}
+          refreshPending={manualRefreshCheck.isPending}
           onQueryChange={(value) => {
             startTransition(() => {
               setSearchQuery(value);
@@ -1041,6 +1074,7 @@ export default function App() {
           onToggleFilter={() => setFilterOpen((open) => !open)}
           onSelectFilter={handleFilterSelect}
           onSetViewMode={setViewMode}
+          onRefreshCheck={() => manualRefreshCheck.mutate()}
         />
 
         {renderCenterResults()}

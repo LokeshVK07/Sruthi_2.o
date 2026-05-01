@@ -11,6 +11,7 @@ from .cache import cache_status, trim_cache
 from .config import FRONTEND_DIST_DIR, WEB_ORIGIN, WARMUP_BATCH_SIZE, STREAM_PREFETCH_LIMIT
 from .db import init_db
 from .playback import public_song_status, queue_prefetch, stream_song, unavailable_silence_bytes, warmup_song
+from .refresh import get_refresh_status, start_refresh_worker, trigger_refresh
 from .repository import (
     count_albums,
     count_songs,
@@ -51,6 +52,7 @@ if frontend_assets.exists():
 @app.on_event("startup")
 def startup():
     init_db()
+    start_refresh_worker()
 
 
 @app.get("/api/health")
@@ -186,6 +188,16 @@ async def playback_prefetch(request: Request):
 @app.get("/api/cache/status")
 def cache_status_route():
     return cache_status()
+
+
+@app.get("/api/refresh/status")
+def refresh_status_route():
+    return get_refresh_status()
+
+
+@app.post("/api/refresh/check")
+def refresh_check_route():
+    return trigger_refresh(force=False)
 
 
 @app.post("/api/cache/trim")

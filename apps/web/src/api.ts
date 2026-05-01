@@ -1,4 +1,4 @@
-import type { Album, AlbumDetail, HomeResponse, Playlist, Song } from "./types.js";
+import type { Album, AlbumDetail, HomeResponse, Playlist, RefreshStatus, Song } from "./types.js";
 
 type ApiSong =
   | Song
@@ -146,5 +146,7 @@ export const apiClient = {
       body: JSON.stringify({ songIds })
     }),
   warmup: () => api<{ ok: boolean; queued: number }>("/api/warmup", { method: "POST" }),
-  cacheStatus: () => api<{ fileCount: number; totalBytes: number; totalMegabytes: number; limitMegabytes: number }>("/api/cache/status")
+  cacheStatus: () => api<{ fileCount: number; totalBytes: number; totalMegabytes: number; limitMegabytes: number }>("/api/cache/status"),
+  refreshStatus: () => api<RefreshStatus>("/api/refresh/status"),
+  refreshCheck: () => api<RefreshStatus>("/api/refresh/check", { method: "POST" }),
 };

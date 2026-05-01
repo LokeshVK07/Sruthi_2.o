@@ -50,3 +50,17 @@ export type Playlist = {
   description?: string | null;
   songCount?: number;
 };
+
+export type RefreshStatus = {
+  enabled: boolean;
+  status: "idle" | "checking" | "downloading" | "applying" | "updated" | "error" | string;
+  message?: string;
+  manifestUrl?: string;
+  currentVersion?: string;
+  remoteVersion?: string;
+  checkedAt?: string;
+  updatedAt?: string;
+  downloadedBytes?: number;
+  totalBytes?: number;
+  error?: string;
+};
