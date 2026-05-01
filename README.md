@@ -46,7 +46,7 @@ Safety guarantees:
 - [apps/api/app/refresh.py](/Users/lokesh/Sruthi%202.o/apps/api/app/refresh.py): background snapshot refresh consumer
 - [apps/web](/Users/lokesh/Sruthi%202.o/apps/web): custom player UI
 - [apps/server](/Users/lokesh/Sruthi%202.o/apps/server): older temporary Node backend kept only for reference
-- [.github/workflows/refresh-library.yml](/Users/lokesh/Sruthi%202.o/.github/workflows/refresh-library.yml): GitHub Actions snapshot producer
+- [.github/workflows/background-refresh.yml](/Users/lokesh/Sruthi%202.o/.github/workflows/background-refresh.yml): GitHub Actions snapshot producer
 - [scripts/publish_snapshot_manifest.py](/Users/lokesh/Sruthi%202.o/scripts/publish_snapshot_manifest.py): manifest builder
 
 ## Local setup
@@ -131,7 +131,7 @@ The app now uses a producer/consumer refresh model:
 
 ### Producer
 
-The workflow in [.github/workflows/refresh-library.yml](/Users/lokesh/Sruthi%202.o/.github/workflows/refresh-library.yml):
+The workflow in [.github/workflows/background-refresh.yml](/Users/lokesh/Sruthi%202.o/.github/workflows/background-refresh.yml):
 
 - runs every 6 hours
 - supports manual trigger
