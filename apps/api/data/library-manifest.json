@@ -1,9 +1,9 @@
 {
-  "albums": 4702,
+  "albums": 4701,
   "download_url": "https://github.com/LokeshVK07/Sruthi_2.o/releases/download/library-snapshot/vibe2o-library.sqlite3",
-  "sha256": "d6e3224b980b812c905de5d244828b3316561c1b3b749fe4389d152782b9cade",
+  "sha256": "8530d1318844b29781efcd52c18f2e542a3a3c8d1ced307f6f93fe209d61ca3d",
   "size": 32428032,
-  "songs": 27425,
-  "updated_at": "2026-05-01T12:00:00Z",
-  "version": "2026-05-01T12:00:00Z"
+  "songs": 27415,
+  "updated_at": "2026-05-01T14:24:27Z",
+  "version": "2026-05-01T14:24:27Z"
 }
