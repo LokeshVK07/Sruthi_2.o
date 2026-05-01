@@ -19,6 +19,23 @@ Vibe 2.o is a scraper-backed Tamil music player with:
 
 SQLite is used here because repeated album upserts and refresh writes were not stable enough with DuckDB under this workload.
 
+## Automated background refresh
+
+The catalog refresh producer runs in GitHub Actions on a schedule and on manual trigger.
+
+The workflow refreshes a temporary snapshot first, validates it, builds the app, and only then publishes:
+
+- the refreshed SQLite snapshot to the `library-snapshot` GitHub Release
+- the updated manifest at `apps/api/data/library-manifest.json`
+
+Safety guarantees:
+
+- refresh runs use a temp snapshot in the Actions runner, never the live published file
+- snapshot publication happens only after refresh, validation, and build all succeed
+- DuckDB-backed validation rejects empty, corrupt, or sharply regressed snapshots
+- the workflow uses GitHub Actions concurrency protection to prevent overlapping refresh runs
+- if any step fails, the previous published manifest and snapshot stay untouched
+
 ## Project layout
 
 - [apps/api](/Users/lokesh/Sruthi%202.o/apps/api): active backend
