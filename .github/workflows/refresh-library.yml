@@ -59,17 +59,25 @@ jobs:
           fi
           echo "SNAPSHOT_DB=${SNAPSHOT_DB}" >> "${GITHUB_ENV}"
 
-      - name: Run incremental refresh
+      - name: Run base incremental refresh
         env:
           DATABASE_PATH: ${{ env.SNAPSHOT_DB }}
         working-directory: apps/api
         run: |
           python -m app.scripts.init_db
           python -m app.scripts.run_scrape --incremental
+
+      - name: Run movie-index incremental refresh
+        continue-on-error: true
+        env:
+          DATABASE_PATH: ${{ env.SNAPSHOT_DB }}
+        working-directory: apps/api
+        run: |
           python -m app.scripts.scrape_movie_index --incremental
 
       - name: Run optional full scan
         if: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.full_scan == 'true' }}
+        continue-on-error: true
         env:
           DATABASE_PATH: ${{ env.SNAPSHOT_DB }}
         working-directory: apps/api
