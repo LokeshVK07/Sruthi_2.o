@@ -28,11 +28,6 @@ jobs:
     name: Refresh and Publish Vibe 2.o Catalog
     runs-on: ubuntu-latest
     timeout-minutes: 360
-    env:
-      SNAPSHOT_DIR: ${{ runner.temp }}/vibe2o-refresh
-      SNAPSHOT_NAME: vibe2o-library.sqlite3
-      GENERATED_MANIFEST: ${{ runner.temp }}/vibe2o-refresh/library-manifest.json
-      VALIDATION_SUMMARY: ${{ runner.temp }}/vibe2o-refresh/validation-summary.json
 
     steps:
       - name: Check out repository
@@ -89,6 +84,17 @@ jobs:
           fi
           echo "VIBE_FULL_REFRESH=${full_refresh}" >> "$GITHUB_ENV"
 
+      - name: Prepare workflow paths
+        run: |
+          set -euo pipefail
+          snapshot_dir="${RUNNER_TEMP}/vibe2o-refresh"
+          generated_dir=".github/.generated/background-refresh"
+          mkdir -p "${snapshot_dir}" "${generated_dir}"
+          echo "SNAPSHOT_DIR=${snapshot_dir}" >> "$GITHUB_ENV"
+          echo "SNAPSHOT_NAME=vibe2o-library.sqlite3" >> "$GITHUB_ENV"
+          echo "GENERATED_MANIFEST=${generated_dir}/library-manifest.json" >> "$GITHUB_ENV"
+          echo "VALIDATION_SUMMARY=${generated_dir}/validation-summary.json" >> "$GITHUB_ENV"
+
       - name: Ensure library release exists
         env:
           GH_TOKEN: ${{ github.token }}
@@ -138,10 +144,9 @@ jobs:
           fi
 
       - name: Validate catalog and build release manifest
-        env:
-          DOWNLOAD_URL: https://github.com/${{ github.repository }}/releases/download/library-snapshot/${{ env.SNAPSHOT_NAME }}
         run: |
           set -euo pipefail
+          DOWNLOAD_URL="https://github.com/${GITHUB_REPOSITORY}/releases/download/library-snapshot/${SNAPSHOT_NAME}"
           python scripts/validate_snapshot_with_duckdb.py \
             --db-path "${SNAPSHOT_DB}" \
             --previous-manifest apps/api/data/library-manifest.json \
