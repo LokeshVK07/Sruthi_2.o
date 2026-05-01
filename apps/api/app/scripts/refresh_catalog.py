@@ -4,7 +4,8 @@ import argparse
 import json
 
 from app.db import init_db
-from app.scraper import site_scraper
+from app.schemas import ScrapeSummary
+from app.scraper import ChallengeError, site_scraper
 
 
 def merge_counts(*summaries):
@@ -38,11 +39,24 @@ if not args.skip_pagewise:
     )
 
 if not args.skip_movie_index:
-    summaries.append(
-        site_scraper.scrape_movie_index(
-            incremental=not args.full,
-            full_scan=args.full,
+    try:
+        summaries.append(
+            site_scraper.scrape_movie_index(
+                incremental=not args.full,
+                full_scan=args.full,
+            )
         )
-    )
+    except ChallengeError:
+        summaries.append(
+            ScrapeSummary(
+                run_id="movie-index-skipped",
+                pages_scraped=0,
+                albums_new=0,
+                albums_updated=0,
+                albums_failed=0,
+                songs_total=0,
+                status="skipped",
+            )
+        )
 
 print(json.dumps(merge_counts(*summaries), indent=2))
