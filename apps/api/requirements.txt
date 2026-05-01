@@ -1,0 +1,10 @@
+fastapi
+uvicorn
+duckdb
+httpx
+cloudscraper
+beautifulsoup4
+lxml
+tenacity
+curl_cffi
+pydantic

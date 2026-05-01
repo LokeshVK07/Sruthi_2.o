@@ -1,0 +1,5 @@
+import { jsx as _jsx, jsxs as _jsxs } from "react/jsx-runtime";
+import { ChevronRight, Play } from "lucide-react";
+export default function RecentlyPlayed({ title, songs, viewMode, fallbackArt, onSelect, onViewAll }) {
+    return (_jsxs("section", { className: "content-section", children: [_jsxs("div", { className: "section-header", children: [_jsx("h2", { children: title }), _jsxs("button", { className: "section-link", onClick: onViewAll, children: ["View all", _jsx(ChevronRight, { size: 16 })] })] }), _jsx("div", { className: viewMode === "grid" ? "recent-grid" : "recent-list", children: songs.map((song) => (_jsxs("button", { className: viewMode === "grid" ? "recent-card" : "recent-row", onClick: () => onSelect(song), children: [_jsxs("div", { className: "recent-card__media", children: [_jsx("img", { src: song.artworkUrl || fallbackArt, alt: song.title }), _jsx("span", { className: "recent-card__play", children: _jsx(Play, { size: 15 }) })] }), _jsxs("div", { className: "recent-card__copy", children: [_jsx("strong", { children: song.title }), _jsx("span", { children: song.artist })] })] }, song.id))) })] }));
+}

@@ -1,0 +1,8 @@
+node_modules
+apps/web/node_modules
+apps/api/.cache
+apps/api/data
+apps/web/dist
+apps/server
+.DS_Store
+*.log

@@ -1,0 +1,27 @@
+{
+  "name": "melodify",
+  "private": true,
+  "version": "0.1.0",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "dev": "concurrently \"npm:dev:server\" \"npm:dev:web\"",
+    "dev:server": "npm --workspace @melodify/api run dev",
+    "dev:web": "npm --workspace @melodify/web run dev",
+    "build": "npm --workspace @melodify/web run build",
+    "start": "npm --workspace @melodify/api run start",
+    "lint": "npm --workspace @melodify/api run lint && npm --workspace @melodify/web run lint",
+    "test": "npm --workspace @melodify/api run test && npm --workspace @melodify/web run test",
+    "smoke": "npm --workspace @melodify/api run smoke",
+    "db:init": "npm --workspace @melodify/api run db:init",
+    "scrape": "npm --workspace @melodify/api run scrape",
+    "scrape:incremental": "npm --workspace @melodify/api run scrape:incremental",
+    "seed": "npm --workspace @melodify/api run seed"
+  },
+  "devDependencies": {
+    "concurrently": "^9.2.1",
+    "typescript": "^5.9.3"
+  }
+}
