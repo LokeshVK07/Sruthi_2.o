@@ -5,10 +5,11 @@ on:
     - cron: "0 */6 * * *"
   workflow_dispatch:
     inputs:
-      full_scan:
-        description: "Run a full movie-index scan after the incremental refresh"
+      full_refresh:
+        description: "Run a full catalog refresh across page-wise and movie-index sources"
         required: false
-        default: "false"
+        default: false
+        type: boolean
 
 permissions:
   contents: write
@@ -23,6 +24,15 @@ jobs:
     timeout-minutes: 360
 
     steps:
+      - name: Resolve refresh mode
+        run: |
+          set -euo pipefail
+          full_refresh="false"
+          if [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" && "${{ inputs.full_refresh }}" == "true" ]]; then
+            full_refresh="true"
+          fi
+          echo "VIBE_FULL_REFRESH=${full_refresh}" >> "${GITHUB_ENV}"
+
       - name: Check out repository
         uses: actions/checkout@v5
         with:
@@ -59,28 +69,17 @@ jobs:
           fi
           echo "SNAPSHOT_DB=${SNAPSHOT_DB}" >> "${GITHUB_ENV}"
 
-      - name: Run base incremental refresh
+      - name: Run catalog refresh
         env:
           DATABASE_PATH: ${{ env.SNAPSHOT_DB }}
         working-directory: apps/api
         run: |
           python -m app.scripts.init_db
-          python -m app.scripts.run_scrape --incremental
-
-      - name: Run movie-index incremental refresh
-        env:
-          DATABASE_PATH: ${{ env.SNAPSHOT_DB }}
-        working-directory: apps/api
-        run: |
-          python -m app.scripts.scrape_movie_index --incremental
-
-      - name: Run optional full scan
-        if: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.full_scan == 'true' }}
-        env:
-          DATABASE_PATH: ${{ env.SNAPSHOT_DB }}
-        working-directory: apps/api
-        run: |
-          python -m app.scripts.scrape_movie_index --full-scan
+          if [[ "${VIBE_FULL_REFRESH}" == "true" ]]; then
+            python -m app.scripts.refresh_catalog --full
+          else
+            python -m app.scripts.refresh_catalog
+          fi
 
       - name: Build manifest
         env:

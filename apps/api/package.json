@@ -12,6 +12,8 @@
     "scrape": "/opt/anaconda3/bin/python3 -m app.scripts.run_scrape",
     "scrape:album": "/opt/anaconda3/bin/python3 -m app.scripts.scrape_album",
     "scrape:index": "/opt/anaconda3/bin/python3 -m app.scripts.scrape_movie_index",
+    "scrape:refresh": "/opt/anaconda3/bin/python3 -m app.scripts.refresh_catalog",
+    "scrape:refresh:full": "/opt/anaconda3/bin/python3 -m app.scripts.refresh_catalog --full",
     "scrape:batches": "/opt/anaconda3/bin/python3 -m app.scripts.scrape_batches",
     "scrape:incremental": "/opt/anaconda3/bin/python3 -m app.scripts.run_scrape --incremental",
     "smoke": "/opt/anaconda3/bin/python3 -m app.scripts.smoke_test"
