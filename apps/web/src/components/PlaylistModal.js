@@ -1,7 +1,0 @@
-import { jsx as _jsx, jsxs as _jsxs } from "react/jsx-runtime";
-import { X } from "lucide-react";
-export default function PlaylistModal({ open, value, onChange, onClose, onCreate }) {
-    if (!open)
-        return null;
-    return (_jsx("div", { className: "playlist-modal-backdrop", role: "presentation", onClick: onClose, children: _jsxs("div", { className: "playlist-modal", role: "dialog", "aria-modal": "true", "aria-labelledby": "playlist-modal-title", onClick: (event) => event.stopPropagation(), children: [_jsxs("div", { className: "playlist-modal__header", children: [_jsxs("div", { children: [_jsx("span", { className: "playlist-modal__eyebrow", children: "Playlist" }), _jsx("h2", { id: "playlist-modal-title", children: "Create a new playlist" })] }), _jsx("button", { className: "playlist-modal__close", onClick: onClose, "aria-label": "Close", children: _jsx(X, { size: 18 }) })] }), _jsxs("label", { className: "playlist-modal__field", children: [_jsx("span", { children: "Name" }), _jsx("input", { value: value, onChange: (event) => onChange(event.target.value), placeholder: "Late night Tamil", autoFocus: true })] }), _jsxs("div", { className: "playlist-modal__actions", children: [_jsx("button", { className: "playlist-modal__ghost", onClick: onClose, children: "Cancel" }), _jsx("button", { className: "playlist-modal__primary", onClick: onCreate, children: "Create playlist" })] })] }) }));
-}
