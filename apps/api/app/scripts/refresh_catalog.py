@@ -30,6 +30,18 @@ def ensure_full_refresh_progress(*summaries: ScrapeSummary) -> None:
         raise RuntimeError("Full refresh aborted because no albums were processed")
 
 
+def failed_summary(run_id: str, status: str = "failed") -> ScrapeSummary:
+    return ScrapeSummary(
+        run_id=run_id,
+        pages_scraped=0,
+        albums_new=0,
+        albums_updated=0,
+        albums_failed=0,
+        songs_total=0,
+        status=status,
+    )
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument(
@@ -62,12 +74,18 @@ def main() -> None:
 
     if run_pagewise:
         print("INFO - [1/3] Refreshing page-wise listings...")
-        summaries.append(
-            site_scraper.scrape_site(
-                incremental=not args.full,
-                full_scan=args.full,
+        try:
+            summaries.append(
+                site_scraper.scrape_site(
+                    incremental=not args.full,
+                    full_scan=args.full,
+                )
             )
-        )
+        except Exception as exc:
+            if not args.full:
+                raise
+            print(f"WARN - page-wise refresh failed during full scan: {exc}")
+            summaries.append(failed_summary("pagewise-failed"))
 
     if run_movie_index:
         print("INFO - [2/3] Refreshing movie-index catalog...")
@@ -78,20 +96,11 @@ def main() -> None:
                     full_scan=args.full,
                 )
             )
-        except ChallengeError:
-            if args.full:
+        except (ChallengeError, Exception) as exc:
+            if not args.full:
                 raise
-            summaries.append(
-                ScrapeSummary(
-                    run_id="movie-index-skipped",
-                    pages_scraped=0,
-                    albums_new=0,
-                    albums_updated=0,
-                    albums_failed=0,
-                    songs_total=0,
-                    status="skipped",
-                )
-            )
+            print(f"WARN - movie-index refresh failed during full scan: {exc}")
+            summaries.append(failed_summary("movie-index-failed"))
 
     if args.full:
         print("INFO - [3/3] Re-scraping every known album in the catalog...")
