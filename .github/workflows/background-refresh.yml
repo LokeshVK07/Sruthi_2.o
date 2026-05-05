@@ -1,22 +1,33 @@
-name: Background Refresh Vibe 2.o
+name: Refresh DuckDB Library
 
 on:
+  schedule:
+    - cron: "30 0 * * *"
   workflow_dispatch:
     inputs:
-      full_refresh:
-        description: Run a full catalog refresh instead of incremental mode
+      scan_mode:
+        description: "Scrape mode passed to refresh_catalog.py"
         required: false
-        default: true
-        type: boolean
-  schedule:
-    - cron: "17 */6 * * *"
+        default: "all"
+      full_scan:
+        description: "Run in full scan mode"
+        required: false
+        default: "true"
+      delay:
+        description: "Delay between page fetches"
+        required: false
+        default: "1.3"
+      publish_ref:
+        description: "Git ref used for manifest updates and push target"
+        required: false
+        default: "main"
 
 permissions:
   contents: write
   actions: write
 
 concurrency:
-  group: vibe2o-background-refresh
+  group: refresh-library
   cancel-in-progress: false
 
 defaults:
@@ -24,8 +35,7 @@ defaults:
     shell: bash
 
 jobs:
-  refresh-and-publish:
-    name: Refresh and Publish Vibe 2.o Catalog
+  refresh:
     runs-on: ubuntu-latest
     timeout-minutes: 360
 
@@ -33,7 +43,29 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v5
         with:
+          ref: ${{ github.event.inputs.publish_ref || 'main' }}
           fetch-depth: 0
+
+      - name: Define retry helper
+        run: |
+          cat > /tmp/retry.sh <<'EOF'
+          retry() {
+            local attempts="$1"
+            local sleep_seconds="$2"
+            shift 2
+            local n=1
+            while true; do
+              "$@" && break
+              if [ "$n" -ge "$attempts" ]; then
+                echo "Command failed after $n attempt(s): $*"
+                return 1
+              fi
+              echo "Attempt $n failed. Retrying in ${sleep_seconds}s: $*"
+              sleep "$sleep_seconds"
+              n=$((n + 1))
+            done
+          }
+          EOF
 
       - name: Set up Python
         uses: actions/setup-python@v6
@@ -46,155 +78,166 @@ jobs:
           node-version: "22"
           cache: "npm"
 
-      - name: Install workflow dependencies
+      - name: Install scraper dependencies
         run: |
-          python -m pip install --upgrade pip
-          python -m pip install -r apps/api/requirements.txt
-          npm install
+          source /tmp/retry.sh
+          retry 3 20 python -m pip install --upgrade pip
+          retry 3 30 python -m pip install -r apps/api/requirements.txt
+          retry 3 30 npm install
 
-      - name: Validate workflow configuration
+      - name: Ensure data directories exist
+        run: mkdir -p data exports apps/api/data .github/.generated/background-refresh
+
+      - name: Resolve workflow paths
         run: |
-          set -euo pipefail
+          echo "WORKING_SQLITE_DB=${GITHUB_WORKSPACE}/data/melodify.sqlite3" >> "$GITHUB_ENV"
+          echo "GENERATED_SQLITE_MANIFEST=${GITHUB_WORKSPACE}/.github/.generated/background-refresh/library-manifest.json" >> "$GITHUB_ENV"
+          echo "GENERATED_DUCKDB_MANIFEST=${GITHUB_WORKSPACE}/.github/.generated/background-refresh/library-manifest.duckdb.json" >> "$GITHUB_ENV"
+          echo "VALIDATION_SUMMARY=${GITHUB_WORKSPACE}/.github/.generated/background-refresh/validation-summary.json" >> "$GITHUB_ENV"
+          echo "DUCKDB_OUTPUT=${GITHUB_WORKSPACE}/apps/api/data/melodify.duckdb" >> "$GITHUB_ENV"
 
-          required_files=(
-            ".github/workflows/background-refresh.yml"
-            "apps/api/requirements.txt"
-            "apps/api/app/scripts/init_db.py"
-            "apps/api/app/scripts/refresh_catalog.py"
-            "scripts/publish_snapshot_manifest.py"
-            "scripts/validate_snapshot_with_duckdb.py"
-            "apps/api/data/melodify.sqlite3"
-            "package-lock.json"
-            "package.json"
-          )
-
-          for file in "${required_files[@]}"; do
-            if [[ ! -e "$file" ]]; then
-              echo "::error::Required workflow file is missing: $file"
-              exit 1
-            fi
-          done
-
-      - name: Resolve run mode
-        run: |
-          set -euo pipefail
-          full_refresh="true"
-          if [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" && "${{ inputs.full_refresh }}" != "true" ]]; then
-            full_refresh="false"
-          fi
-          echo "VIBE_FULL_REFRESH=${full_refresh}" >> "$GITHUB_ENV"
-
-      - name: Prepare workflow paths
-        run: |
-          set -euo pipefail
-          snapshot_dir="${RUNNER_TEMP}/vibe2o-refresh"
-          generated_dir=".github/.generated/background-refresh"
-          mkdir -p "${snapshot_dir}" "${generated_dir}"
-          echo "SNAPSHOT_DIR=${snapshot_dir}" >> "$GITHUB_ENV"
-          echo "SNAPSHOT_NAME=vibe2o-library.sqlite3" >> "$GITHUB_ENV"
-          echo "GENERATED_MANIFEST=${generated_dir}/library-manifest.json" >> "$GITHUB_ENV"
-          echo "VALIDATION_SUMMARY=${generated_dir}/validation-summary.json" >> "$GITHUB_ENV"
-
-      - name: Ensure library release exists
+      - name: Ensure release targets exist
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          set -euo pipefail
           gh release view library-snapshot --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1 || \
-            gh release create library-snapshot --repo "${GITHUB_REPOSITORY}" --title "Library Snapshot" --notes "Managed library snapshot release"
+            gh release create library-snapshot --repo "${GITHUB_REPOSITORY}" --title "Library Snapshot" --notes "Managed SQLite library snapshot release"
+          gh release view local-library --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1 || \
+            gh release create local-library --repo "${GITHUB_REPOSITORY}" --title "DuckDB Library Snapshot" --notes "Managed DuckDB library snapshot release"
 
-      - name: Prepare working database
-        env:
-          GH_TOKEN: ${{ github.token }}
+      - name: Download current published DB
         run: |
-          set -euo pipefail
-          mkdir -p "${SNAPSHOT_DIR}"
-          export SNAPSHOT_DB="${SNAPSHOT_DIR}/${SNAPSHOT_NAME}"
-          if gh release download library-snapshot --repo "${GITHUB_REPOSITORY}" --pattern "${SNAPSHOT_NAME}" --dir "${SNAPSHOT_DIR}" >/dev/null 2>&1; then
-            echo "Using previously published snapshot."
-          else
-            cp apps/api/data/melodify.sqlite3 "${SNAPSHOT_DB}"
-            echo "Using repository snapshot as fallback seed."
-          fi
-          echo "SNAPSHOT_DB=${SNAPSHOT_DB}" >> "${GITHUB_ENV}"
+          source /tmp/retry.sh
+          DOWNLOAD_URL="$(python - <<'PY'
+          import json
+          from pathlib import Path
+          manifest = json.loads(Path("apps/api/data/library-manifest.json").read_text())
+          print(manifest["download_url"])
+          PY
+          )"
+          retry 3 20 curl -fL --retry 3 --retry-delay 20 -o "${WORKING_SQLITE_DB}" "${DOWNLOAD_URL}"
 
-      - name: Refresh catalog from MassTamilan
+      - name: Back up current published DB
+        uses: actions/upload-artifact@v4
+        with:
+          name: sqlite-backup-${{ github.run_id }}
+          path: ${{ env.WORKING_SQLITE_DB }}
+          retention-days: 30
+
+      - name: Run scraper
         env:
-          DATABASE_PATH: ${{ env.SNAPSHOT_DB }}
+          INPUT_SCAN_MODE: ${{ github.event.inputs.scan_mode || 'all' }}
+          INPUT_FULL_SCAN: ${{ github.event.inputs.full_scan || 'true' }}
+          INPUT_DELAY: ${{ github.event.inputs.delay || '1.3' }}
+          DATABASE_PATH: ${{ env.WORKING_SQLITE_DB }}
         working-directory: apps/api
         run: |
-          set -euo pipefail
-          python -m app.scripts.init_db
-          if [[ "${VIBE_FULL_REFRESH}" == "true" ]]; then
-            python -m app.scripts.refresh_catalog --full
+          source /tmp/retry.sh
+          if [ "${INPUT_FULL_SCAN}" = "true" ]; then
+            FULL_FLAG="--full"
           else
-            python -m app.scripts.refresh_catalog
+            FULL_FLAG=""
           fi
+          retry 2 120 python -m app.scripts.refresh_catalog --mode "${INPUT_SCAN_MODE}" --delay "${INPUT_DELAY}" ${FULL_FLAG}
 
       - name: Validate refreshed local catalog files
         run: |
-          set -euo pipefail
-          if [[ ! -f "${SNAPSHOT_DB}" ]]; then
-            echo "::error::Expected ${SNAPSHOT_DB} to exist after refresh."
+          if [[ ! -f "${WORKING_SQLITE_DB}" ]]; then
+            echo "::error::Expected ${WORKING_SQLITE_DB} to exist after refresh."
             exit 1
           fi
-          if [[ ! -s "${SNAPSHOT_DB}" ]]; then
-            echo "::error::${SNAPSHOT_DB} exists but is empty."
+          if [[ ! -s "${WORKING_SQLITE_DB}" ]]; then
+            echo "::error::${WORKING_SQLITE_DB} exists but is empty."
             exit 1
           fi
-
-      - name: Validate catalog and build release manifest
-        run: |
-          set -euo pipefail
-          DOWNLOAD_URL="https://github.com/${GITHUB_REPOSITORY}/releases/download/library-snapshot/${SNAPSHOT_NAME}"
           python scripts/validate_snapshot_with_duckdb.py \
-            --db-path "${SNAPSHOT_DB}" \
+            --db-path "${WORKING_SQLITE_DB}" \
             --previous-manifest apps/api/data/library-manifest.json \
             --summary-path "${VALIDATION_SUMMARY}"
 
+      - name: Build app before publish
+        run: npm run build
+
+      - name: Publish merged DBs and manifests
+        env:
+          INPUT_PUBLISH_REF: ${{ github.event.inputs.publish_ref || 'main' }}
+        run: |
           VERSION="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
           python scripts/publish_snapshot_manifest.py \
-            --db-path "${SNAPSHOT_DB}" \
-            --manifest-path "${GENERATED_MANIFEST}" \
-            --download-url "${DOWNLOAD_URL}" \
+            --db-path "${WORKING_SQLITE_DB}" \
+            --manifest-path "${GENERATED_SQLITE_MANIFEST}" \
+            --download-url "https://github.com/${GITHUB_REPOSITORY}/releases/download/library-snapshot/vibe2o-library.sqlite3" \
+            --version "${VERSION}"
+          python scripts/publish_library.py \
+            --db-path "${WORKING_SQLITE_DB}" \
+            --output-db "${DUCKDB_OUTPUT}" \
+            --manifest "${GENERATED_DUCKDB_MANIFEST}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --ref "${INPUT_PUBLISH_REF}" \
             --version "${VERSION}"
 
-          if [[ ! -f "${GENERATED_MANIFEST}" ]]; then
-            echo "::error::Release manifest was not generated."
-            exit 1
-          fi
-
-      - name: Build app before publish
-        run: |
-          set -euo pipefail
-          npm run build
-
-      - name: Upload build artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: vibe2o-refresh-artifacts
-          if-no-files-found: error
-          path: |
-            ${{ env.GENERATED_MANIFEST }}
-            ${{ env.VALIDATION_SUMMARY }}
-
-      - name: Publish snapshot asset after successful validation and build
+      - name: Upload release assets
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          set -euo pipefail
-          gh release upload library-snapshot "${SNAPSHOT_DB}#${SNAPSHOT_NAME}" --repo "${GITHUB_REPOSITORY}" --clobber
+          gh release upload library-snapshot "${WORKING_SQLITE_DB}#vibe2o-library.sqlite3" --repo "${GITHUB_REPOSITORY}" --clobber
+          gh release upload local-library "${DUCKDB_OUTPUT}#vibe2o-library.duckdb" --repo "${GITHUB_REPOSITORY}" --clobber
 
-      - name: Publish manifest after successful snapshot upload
+      - name: Rewrite DuckDB manifest URL
         run: |
-          set -euo pipefail
-          cp "${GENERATED_MANIFEST}" apps/api/data/library-manifest.json
-          if git diff --quiet -- apps/api/data/library-manifest.json; then
-            echo "No manifest change to commit."
-            exit 0
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          manifest_path = Path(".github/.generated/background-refresh/library-manifest.duckdb.json")
+          manifest = json.loads(manifest_path.read_text())
+          manifest["download_url"] = "https://github.com/${{ github.repository }}/releases/download/local-library/vibe2o-library.duckdb"
+          manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
+          PY
+
+      - name: Publish committed manifests
+        run: |
+          cp "${GENERATED_SQLITE_MANIFEST}" apps/api/data/library-manifest.json
+          cp "${GENERATED_DUCKDB_MANIFEST}" apps/api/data/library-manifest.duckdb.json
+
+      - name: Detect repository changes
+        id: changes
+        run: |
+          if git diff --quiet -- apps/api/data/library-manifest.json apps/api/data/library-manifest.duckdb.json; then
+            echo "changed=false" >> "${GITHUB_OUTPUT}"
+          else
+            echo "changed=true" >> "${GITHUB_OUTPUT}"
           fi
+
+      - name: Commit refreshed library
+        if: steps.changes.outputs.changed == 'true'
+        run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add apps/api/data/library-manifest.json
-          git commit -m "chore(data): refresh library manifest"
-          git push origin HEAD:main
+          git add apps/api/data/library-manifest.json apps/api/data/library-manifest.duckdb.json
+          git commit -m "chore(data): refresh library manifests"
+
+      - name: Push refreshed library
+        if: steps.changes.outputs.changed == 'true'
+        env:
+          PUBLISH_REF: ${{ github.event.inputs.publish_ref || 'main' }}
+        run: |
+          for attempt in 1 2 3 4 5; do
+            if git push origin "HEAD:${PUBLISH_REF}"; then
+              echo "Pushed on attempt ${attempt}."
+              exit 0
+            fi
+            echo "Push rejected on attempt ${attempt}; rebasing onto origin/${PUBLISH_REF}."
+            git fetch origin "${PUBLISH_REF}"
+            git rebase "origin/${PUBLISH_REF}"
+            sleep 5
+          done
+          echo "Failed to push after 5 attempts." >&2
+          exit 1
+
+      - name: Summarize
+        run: |
+          if [ "${{ steps.changes.outputs.changed }}" = "true" ]; then
+            echo "Library snapshots changed and manifests were pushed."
+          else
+            echo "Library snapshots unchanged; nothing pushed."
+          fi

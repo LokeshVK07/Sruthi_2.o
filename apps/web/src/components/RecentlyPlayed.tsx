@@ -1,5 +1,5 @@
 import { ChevronRight, Play } from "lucide-react";
-import type { Song } from "../types.js";
+import type { Song } from "../types";
 
 type ViewMode = "grid" | "list";
 
@@ -10,10 +10,11 @@ type RecentlyPlayedProps = {
   fallbackArt: string;
   currentTrackId?: string;
   onPlayTrack: (track: Song) => void;
+  onPrefetchTrack?: (track: Song) => void;
   onViewAll: () => void;
 };
 
-export default function RecentlyPlayed({ title, tracks, viewMode, fallbackArt, currentTrackId, onPlayTrack, onViewAll }: RecentlyPlayedProps) {
+export default function RecentlyPlayed({ title, tracks, viewMode, fallbackArt, currentTrackId, onPlayTrack, onPrefetchTrack, onViewAll }: RecentlyPlayedProps) {
   return (
     <section className="content-section">
       <div className="section-header">
@@ -40,6 +41,7 @@ export default function RecentlyPlayed({ title, tracks, viewMode, fallbackArt, c
                     : "recent-row"
               }
               onClick={() => onPlayTrack(track)}
+              onMouseEnter={() => onPrefetchTrack?.(track)}
             >
               <div className="recent-card__media">
                 <img src={track.artworkUrl || fallbackArt} alt={track.title} />

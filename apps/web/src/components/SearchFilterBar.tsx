@@ -1,5 +1,5 @@
 import { Filter, Grid2x2, List, Search } from "lucide-react";
-import type { RefreshStatus } from "../types.js";
+import type { RefreshStatus } from "../types";
 
 type FilterKey = "all" | "tracks" | "albums" | "artists" | "playlists";
 type ViewMode = "grid" | "list";

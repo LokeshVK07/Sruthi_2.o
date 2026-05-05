@@ -10,9 +10,18 @@ from fastapi.staticfiles import StaticFiles
 from .cache import cache_status, trim_cache
 from .config import FRONTEND_DIST_DIR, WEB_ORIGIN, WARMUP_BATCH_SIZE, STREAM_PREFETCH_LIMIT
 from .db import init_db
-from .playback import public_song_status, queue_prefetch, stream_song, unavailable_silence_bytes, warmup_song
+from .playback import (
+    prefetch_status,
+    public_song_status,
+    queue_album_prefetch,
+    queue_prefetch,
+    stream_song,
+    unavailable_silence_bytes,
+    warmup_song,
+)
 from .refresh import get_refresh_status, start_refresh_worker, trigger_refresh
 from .repository import (
+    album_song_ids,
     count_albums,
     count_songs,
     get_album_by_id,
@@ -57,7 +66,13 @@ def startup():
 
 @app.get("/api/health")
 def health():
-    return {"ok": True, "cache": cache_status(), "libraryCount": count_songs(), "albumCount": count_albums()}
+    return {
+        "ok": True,
+        "cache": cache_status(),
+        "libraryCount": count_songs(),
+        "albumCount": count_albums(),
+        "prefetch": prefetch_status(),
+    }
 
 
 @app.get("/api/library")
@@ -102,6 +117,7 @@ def album(album_id: str):
     payload = get_album_by_id(album_id)
     if not payload:
         raise HTTPException(404, "Album not found")
+    queue_album_prefetch(album_id, 6, refresh_links=True)
     return payload
 
 
@@ -158,9 +174,16 @@ def admin_scrape_album(album_url: str):
 
 
 @app.post("/api/warmup")
-def warmup():
+async def warmup(request: Request):
+    limit = WARMUP_BATCH_SIZE
+    try:
+        payload = await request.json()
+        if isinstance(payload, dict) and payload.get("limit") is not None:
+            limit = max(1, min(int(payload["limit"]), 96))
+    except Exception:
+        payload = None
     queued = 0
-    for song_id in recent_for_warmup(WARMUP_BATCH_SIZE):
+    for song_id in recent_for_warmup(limit):
         warmup_song(song_id)
         queued += 1
     return {"ok": True, "queued": queued}
@@ -175,6 +198,21 @@ async def prefetch(request: Request):
     return {"queued": queue_prefetch([str(song_id) for song_id in song_ids], STREAM_PREFETCH_LIMIT)}
 
 
+@app.post("/api/prefetch/album")
+async def prefetch_album(request: Request):
+    payload = await request.json()
+    album_id = payload.get("albumId")
+    lead_limit = int(payload.get("leadLimit") or 4)
+    refresh_links = bool(payload.get("refreshLinks"))
+    if not album_id:
+        raise HTTPException(400, "albumId is required")
+    song_ids = album_song_ids(str(album_id))
+    if not song_ids:
+        raise HTTPException(404, "Album not found")
+    queued = queue_album_prefetch(str(album_id), max(1, min(lead_limit, 8)), refresh_links=refresh_links)
+    return {"ok": True, "queued": int(queued), "songCount": len(song_ids)}
+
+
 @app.post("/api/playback/prefetch")
 async def playback_prefetch(request: Request):
     payload = await request.json()
@@ -187,7 +225,9 @@ async def playback_prefetch(request: Request):
 
 @app.get("/api/cache/status")
 def cache_status_route():
-    return cache_status()
+    payload = cache_status()
+    payload.update(prefetch_status())
+    return payload
 
 
 @app.get("/api/refresh/status")

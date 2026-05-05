@@ -1,6 +1,6 @@
 import { Heart, MoreHorizontal, Pause, Play, Repeat, Shuffle, SkipBack, SkipForward, Volume2, VolumeX } from "lucide-react";
-import type { Song } from "../types.js";
-import type { RepeatMode } from "../store.js";
+import type { Song } from "../types";
+import type { RepeatMode } from "../store";
 
 type NowPlayingHeroProps = {
   song: Song | null;

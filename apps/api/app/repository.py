@@ -266,6 +266,16 @@ def get_album_by_id(album_id: str) -> dict[str, Any] | None:
     }
 
 
+def album_song_ids(album_id: str, limit: int | None = None) -> list[str]:
+    query = "SELECT song_id FROM songs WHERE album_id = ? ORDER BY track_number ASC"
+    params: list[Any] = [album_id]
+    if limit is not None:
+        query += " LIMIT ?"
+        params.append(limit)
+    rows = get_connection().execute(query, params).fetchall()
+    return [row[0] for row in rows]
+
+
 def get_song(song_id: str) -> SongRecord | None:
     conn = get_connection()
     row = conn.execute("SELECT * FROM songs WHERE song_id = ?", [song_id]).fetchone()

@@ -23,10 +23,12 @@ SQLite is used here because repeated album upserts and refresh writes were not s
 
 The catalog refresh producer runs in GitHub Actions on a schedule and on manual trigger.
 
-The workflow refreshes a temporary snapshot first, validates it, builds the app, and only then publishes:
+The workflow refreshes a temporary SQLite working snapshot first, validates it, builds the app, and only then publishes:
 
 - the refreshed SQLite snapshot to the `library-snapshot` GitHub Release
 - the updated manifest at `apps/api/data/library-manifest.json`
+- a refreshed DuckDB library to the `local-library` GitHub Release
+- a DuckDB manifest at `apps/api/data/library-manifest.duckdb.json`
 
 Safety guarantees:
 
@@ -48,6 +50,7 @@ Safety guarantees:
 - [apps/server](/Users/lokesh/Sruthi%202.o/apps/server): older temporary Node backend kept only for reference
 - [.github/workflows/background-refresh.yml](/Users/lokesh/Sruthi%202.o/.github/workflows/background-refresh.yml): GitHub Actions snapshot producer
 - [scripts/publish_snapshot_manifest.py](/Users/lokesh/Sruthi%202.o/scripts/publish_snapshot_manifest.py): manifest builder
+- [scripts/publish_library.py](/Users/lokesh/Sruthi%202.o/scripts/publish_library.py): SQLite → DuckDB publisher and DuckDB manifest builder
 
 ## Local setup
 
@@ -133,18 +136,23 @@ The app now uses a producer/consumer refresh model:
 
 The workflow in [.github/workflows/background-refresh.yml](/Users/lokesh/Sruthi%202.o/.github/workflows/background-refresh.yml):
 
-- runs every 6 hours
-- supports manual trigger
-- downloads the previously published snapshot release asset when available
-- scrapes into that existing snapshot so historical shared catalog data is preserved
-- uploads the refreshed SQLite snapshot to the `library-snapshot` GitHub Release as `vibe2o-library.sqlite3`
-- rewrites [apps/api/data/library-manifest.json](/Users/lokesh/Sruthi%202.o/apps/api/data/library-manifest.json) with:
-  - `version`
-  - `updated_at`
-  - `size`
-  - `sha256`
-  - `download_url`
-- commits only the manifest update back to git
+- runs daily and supports manual trigger
+- accepts:
+  - `scan_mode`
+  - `full_scan`
+  - `delay`
+  - `publish_ref`
+- downloads the currently published SQLite snapshot using `apps/api/data/library-manifest.json`
+- refreshes that downloaded DB so old shared catalog data is preserved instead of discarded
+- validates the refreshed SQLite DB
+- builds the web app before publish
+- publishes:
+  - `vibe2o-library.sqlite3` to the `library-snapshot` release
+  - `vibe2o-library.duckdb` to the `local-library` release
+- rewrites and commits only:
+  - [apps/api/data/library-manifest.json](/Users/lokesh/Sruthi%202.o/apps/api/data/library-manifest.json)
+  - [apps/api/data/library-manifest.duckdb.json](/Users/lokesh/Sruthi%202.o/apps/api/data/library-manifest.duckdb.json)
+- retries git push using fetch + rebase if the branch moved
 
 ### Consumer
 

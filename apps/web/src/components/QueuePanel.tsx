@@ -1,6 +1,6 @@
 import { GripVertical } from "lucide-react";
 import { useState } from "react";
-import type { Song } from "../types.js";
+import type { Song } from "../types";
 
 type QueuePanelProps = {
   queue: Song[];

@@ -1,4 +1,4 @@
-import type { Album, AlbumDetail, HomeResponse, Playlist, RefreshStatus, Song } from "./types.js";
+import type { Album, AlbumDetail, HomeResponse, Playlist, RefreshStatus, Song } from "./types";
 
 type ApiSong =
   | Song
@@ -145,8 +145,17 @@ export const apiClient = {
       method: "POST",
       body: JSON.stringify({ songIds })
     }),
-  warmup: () => api<{ ok: boolean; queued: number }>("/api/warmup", { method: "POST" }),
+  warmup: (limit = 48) =>
+    api<{ ok: boolean; queued: number }>("/api/warmup", {
+      method: "POST",
+      body: JSON.stringify({ limit })
+    }),
   cacheStatus: () => api<{ fileCount: number; totalBytes: number; totalMegabytes: number; limitMegabytes: number }>("/api/cache/status"),
   refreshStatus: () => api<RefreshStatus>("/api/refresh/status"),
   refreshCheck: () => api<RefreshStatus>("/api/refresh/check", { method: "POST" }),
+  prefetchAlbum: (albumId: string, leadLimit = 4, refreshLinks = false) =>
+    api<{ ok: boolean; queued: number; songCount: number }>("/api/prefetch/album", {
+      method: "POST",
+      body: JSON.stringify({ albumId, leadLimit, refreshLinks })
+    }),
 };

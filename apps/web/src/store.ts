@@ -1,5 +1,5 @@
 import { create } from "zustand";
-import type { Song } from "./types.js";
+import type { Song } from "./types";
 
 export type RepeatMode = "off" | "all" | "one";
 

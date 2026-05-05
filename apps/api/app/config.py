@@ -30,11 +30,12 @@ REFRESH_TIMEOUT_SECONDS = float(os.getenv("REFRESH_TIMEOUT_SECONDS", "60"))
 MAX_CACHE_SIZE_MB = int(os.getenv("MAX_CACHE_SIZE_MB", "4096"))
 MIN_CACHE_FILE_BYTES = int(os.getenv("MIN_CACHE_FILE_BYTES", "65536"))
 STREAM_PREFETCH_LIMIT = int(os.getenv("STREAM_PREFETCH_LIMIT", "8"))
-WARMUP_BATCH_SIZE = int(os.getenv("WARMUP_BATCH_SIZE", "24"))
+WARMUP_BATCH_SIZE = int(os.getenv("WARMUP_BATCH_SIZE", "48"))
 
 SITE_BASE_URL = os.getenv("MASSTAMILAN_BASE_URL", "https://www.masstamilan.dev")
 SITE_LIST_PATH = os.getenv("MASSTAMILAN_LIST_PATH", "/tamil-songs")
 SITE_MAX_PAGES = int(os.getenv("MASSTAMILAN_MAX_PAGES", "481"))
+SCRAPER_DELAY_SECONDS = float(os.getenv("MASSTAMILAN_DELAY_SECONDS", "0.2"))
 
 for directory in [
     DATABASE_PATH.parent,

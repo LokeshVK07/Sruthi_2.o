@@ -1,5 +1,5 @@
 import { Play, ChevronRight } from "lucide-react";
-import type { Song } from "../types.js";
+import type { Song } from "../types";
 
 export type SmartPick = {
   id: string;

@@ -384,10 +384,10 @@ img {
 
 .hero__body {
   min-width: 0;
-  display: flex;
-  flex-direction: column;
+  display: grid;
+  grid-template-rows: minmax(174px, auto) auto auto;
+  align-content: center;
   align-items: center;
-  justify-content: center;
   gap: 32px;
 }
 
@@ -398,6 +398,7 @@ img {
   flex-direction: column;
   align-items: flex-start;
   text-align: left;
+  min-height: 174px;
 }
 
 .hero__copy h1 {
@@ -406,6 +407,12 @@ img {
   font-size: clamp(2.3rem, 4.3vw, 4rem);
   line-height: 1.03;
   letter-spacing: -0.03em;
+  min-height: calc(2 * 1.03em);
+  max-height: calc(2 * 1.03em);
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
 }
 
 .hero__copy p {
@@ -443,6 +450,7 @@ img {
 .hero__controls {
   width: 100%;
   max-width: 900px;
+  min-height: 74px;
   gap: 18px;
   flex-wrap: wrap;
   justify-content: center;
@@ -536,6 +544,7 @@ img {
   align-items: center;
   width: 100%;
   max-width: 1020px;
+  min-height: 46px;
   margin: 0 auto;
 }
 

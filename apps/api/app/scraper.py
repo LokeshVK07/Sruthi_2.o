@@ -12,7 +12,7 @@ from bs4 import BeautifulSoup
 from curl_cffi import requests as curl_requests
 from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
 
-from .config import SITE_BASE_URL, SITE_LIST_PATH, SITE_MAX_PAGES
+from .config import SCRAPER_DELAY_SECONDS, SITE_BASE_URL, SITE_LIST_PATH, SITE_MAX_PAGES
 from .repository import create_scrape_run, finish_scrape_run, known_album_urls, make_album_id, upsert_album
 from .schemas import ScrapedAlbum, ScrapedSong, ScrapeSummary
 from .utils import canonicalize_url
@@ -80,7 +80,8 @@ class SiteScraper:
             html = curl_response.text
             if curl_response.status_code >= 400 or is_challenge_page(html):
                 raise ChallengeError(f"Challenge page detected for {url}")
-        time.sleep(0.2)
+        if SCRAPER_DELAY_SECONDS > 0:
+            time.sleep(SCRAPER_DELAY_SECONDS)
         return html
 
     def discover_listing(self, page_number: int) -> list[str]:
