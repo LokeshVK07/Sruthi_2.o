@@ -205,9 +205,14 @@ export default function App() {
   } = usePlayerStore();
 
   const librarySongs = songs?.items ?? [];
-  const favoriteSongs = favorites?.items ?? [];
+  const favoriteSongs = favorites?.items?.length ? favorites.items : home?.favorites ?? [];
   const albumItems = albums?.items ?? [];
   const fullLibrary = home?.library?.length ? home.library : librarySongs;
+  const localSearchResults = useMemo(
+    () => (deferredQuery ? fullLibrary.filter((song) => titleMatches(song, deferredQuery)) : []),
+    [fullLibrary, deferredQuery]
+  );
+  const searchSongResults = deferredQuery ? (searchData?.items?.length ? searchData.items : localSearchResults) : [];
   const currentSong = queue[currentIndex] ?? pickInitialSong(fullLibrary);
   const recentSongs = useMemo(
     () =>
@@ -399,14 +404,34 @@ export default function App() {
     playTrack(previousTrack, { autoPlay: true, addToRecent: true, sourceQueue: queue });
   }
 
+  const resolveSongById = (songId: string) =>
+    queue.find((song) => song.id === songId) ??
+    librarySongs.find((song) => song.id === songId) ??
+    favoriteSongs.find((song) => song.id === songId) ??
+    searchData?.items?.find((song) => song.id === songId) ??
+    home?.favorites?.find((song) => song.id === songId) ??
+    home?.recentlyPlayed?.find((song) => song.id === songId) ??
+    fullLibrary.find((song) => song.id === songId) ??
+    null;
+
   const applyFavoriteState = (songId: string, active: boolean) => {
+    const resolvedSong = resolveSongById(songId);
     setSongFavorite(songId, active);
     queryClient.setQueryData<{ items: Song[] } | undefined>(["songs"], (existing) =>
       existing ? { ...existing, items: existing.items.map((song) => (song.id === songId ? { ...song, favorite: active } : song)) } : existing
     );
     queryClient.setQueryData<{ items: Song[] } | undefined>(["favorites"], (existing) =>
       existing
-        ? { ...existing, items: active ? existing.items : existing.items.filter((song) => song.id !== songId) }
+        ? {
+            ...existing,
+            items: active
+              ? existing.items.some((song) => song.id === songId)
+                ? existing.items.map((song) => (song.id === songId ? { ...song, favorite: active } : song))
+                : resolvedSong
+                  ? [{ ...resolvedSong, favorite: true }, ...existing.items]
+                  : existing.items
+              : existing.items.filter((song) => song.id !== songId)
+          }
         : existing
     );
     queryClient.setQueryData(["home"], (existing: any) => {
@@ -419,8 +444,8 @@ export default function App() {
         favorites: active
           ? (existing.favorites ?? []).some((song: Song) => song.id === songId)
             ? (existing.favorites ?? []).map(patch)
-            : currentSong
-              ? [{ ...currentSong, favorite: true }, ...(existing.favorites ?? [])]
+            : resolvedSong
+              ? [{ ...resolvedSong, favorite: true }, ...(existing.favorites ?? [])]
               : existing.favorites
           : (existing.favorites ?? []).filter((song: Song) => song.id !== songId)
       };
@@ -430,11 +455,7 @@ export default function App() {
   const toggleFavorite = useMutation<{ active: boolean }, Error, string, { songId: string; previousActive: boolean }>({
     mutationFn: (songId: string) => apiClient.toggleFavorite(songId),
     onMutate: async (songId) => {
-      const sourceSong =
-        queue.find((song) => song.id === songId) ??
-        librarySongs.find((song) => song.id === songId) ??
-        favoriteSongs.find((song) => song.id === songId) ??
-        fullLibrary.find((song) => song.id === songId);
+      const sourceSong = resolveSongById(songId);
       const nextFavorite = !(sourceSong?.favorite ?? false);
       applyFavoriteState(songId, nextFavorite);
       return { songId, previousActive: sourceSong?.favorite ?? false };
@@ -657,10 +678,10 @@ export default function App() {
         : activeNav === "albums"
           ? selectedAlbum?.songs ?? queueFromAlbum(selectedAlbumId ?? undefined, fullLibrary)
           : activeNav === "search" && deferredQuery
-            ? searchData?.items ?? []
+            ? searchSongResults
             : fullLibrary;
     return base.filter((song) => titleMatches(song, searchQuery));
-  }, [activeNav, favoriteSongs, selectedPlaylist, selectedPlaylistSongs, selectedAlbum?.songs, selectedAlbumId, fullLibrary, deferredQuery, searchData?.items, searchQuery]);
+  }, [activeNav, favoriteSongs, selectedPlaylist, selectedPlaylistSongs, selectedAlbum?.songs, selectedAlbumId, fullLibrary, deferredQuery, searchSongResults, searchQuery]);
 
   const filteredAlbums = useMemo(
     () =>
@@ -1308,7 +1329,7 @@ export default function App() {
               <Sidebar
                 navItems={navItems}
                 activeNav={activeNav}
-                favoriteCount={favoriteSongs.length || 112}
+                favoriteCount={favoriteSongs.length}
                 playlists={playlistSummaries}
                 selectedPlaylistId={selectedPlaylistId}
                 onNavChange={(nav) => {

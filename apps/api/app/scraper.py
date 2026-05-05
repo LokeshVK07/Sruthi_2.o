@@ -203,16 +203,27 @@ class SiteScraper:
         return urls, max_page, has_next
 
     def _album_urls_from_soup(self, soup: BeautifulSoup, base_url: str) -> list[str]:
+        candidate_selectors = (
+            "article a[href]",
+            ".entry-content a[href]",
+            ".post a[href]",
+            ".card a[href]",
+            "h1 a[href], h2 a[href], h3 a[href]",
+            "a[href]",
+        )
         urls: list[str] = []
         seen: set[str] = set()
-        for anchor in soup.select("a[href]"):
-            href = anchor.get("href", "")
-            if "-songs" not in href or "/tamil-songs" in href:
-                continue
-            absolute = canonicalize_url(urljoin(base_url, href))
-            if absolute not in seen:
-                seen.add(absolute)
-                urls.append(absolute)
+        for selector in candidate_selectors:
+            for anchor in soup.select(selector):
+                href = anchor.get("href", "")
+                if "-songs" not in href or "/tamil-songs" in href:
+                    continue
+                absolute = canonicalize_url(urljoin(base_url, href))
+                if absolute not in seen:
+                    seen.add(absolute)
+                    urls.append(absolute)
+            if urls:
+                break
         return urls
 
     def discover_movie_index_sections(self, report: dict[str, Any] | None = None) -> dict[str, list[str]]:
@@ -352,11 +363,31 @@ class SiteScraper:
         text = re.sub(r"\b(128kbps|320kbps|download song|free download)\b", "", text, flags=re.I)
         return normalize(text)
 
+    def _album_title(self, soup: BeautifulSoup) -> str:
+        selectors = (
+            "h1",
+            "meta[property='og:title']",
+            "meta[name='title']",
+            "title",
+        )
+        for selector in selectors:
+            node = soup.select_one(selector)
+            if not node:
+                continue
+            if node.name == "meta":
+                candidate = normalize(node.get("content", ""))
+            else:
+                candidate = normalize(node.get_text(" ", strip=True))
+            candidate = re.sub(r"\s+tamil mp3 songs.*$", "", candidate, flags=re.I).strip(" -|")
+            if candidate:
+                return candidate
+        return ""
+
     def parse_album(self, album_url: str) -> ScrapedAlbum:
         html = self.fetch_html(album_url, referer=f"{SITE_BASE_URL}{SITE_LIST_PATH}")
         soup = BeautifulSoup(html, "lxml")
         album_url = canonicalize_url(album_url)
-        album_name = normalize((soup.select_one("h1").get_text() if soup.select_one("h1") else ""))
+        album_name = self._album_title(soup)
         image = soup.select_one("meta[property='og:image']")
         album_image = urljoin(album_url, image.get("content")) if image and image.get("content") else None
         if not album_image:
@@ -364,18 +395,22 @@ class SiteScraper:
             if image_node and image_node.get("src"):
                 album_image = urljoin(album_url, image_node.get("src"))
         artist = self._labeled_value(soup, ["Starring", "Cast", "Artist"])
-        music_director = self._labeled_value(soup, ["Music", "Music Director", "Composer"])
-        year = self._year(self._labeled_value(soup, ["Year", "Released"]))
-        language = self._labeled_value(soup, ["Language"])
+        music_director = self._labeled_value(soup, ["Music", "Music Director", "Composer", "Director", "Artists"])
+        year = self._year(self._labeled_value(soup, ["Year", "Released", "Release Date"]))
+        language = self._labeled_value(soup, ["Language", "Category"])
 
         songs: list[ScrapedSong] = []
-        row_blocks = soup.select('table#tl tr[itemprop="itemListElement"]')
-        music_blocks = row_blocks if row_blocks else soup.select('span[itemtype="http://schema.org/MusicRecording"]')
+        row_blocks = soup.select('table#tl tr[itemprop="itemListElement"], table tr[itemprop="itemListElement"]')
+        music_blocks = row_blocks if row_blocks else soup.select(
+            'span[itemtype="http://schema.org/MusicRecording"], li[itemprop="itemListElement"], .tracklist li, .entry-content li'
+        )
         for idx, block in enumerate(music_blocks, start=1):
             block_scope = block.select_one('span[itemtype="http://schema.org/MusicRecording"]') if row_blocks else block
             block_scope = block_scope or block
             track_name = self._track_name_from_text(block_scope)
             if not track_name or track_name.lower().startswith("download "):
+                continue
+            if len(track_name) < 2:
                 continue
             detail_link = block_scope.select_one('link[itemprop="url"]')
             anchor = block_scope.select_one("a[href]")

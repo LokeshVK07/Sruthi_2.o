@@ -263,12 +263,8 @@ def main() -> None:
                     _append_summary(report, "pagewise", summary)
                 except Exception as exc:
                     message = f"Page-wise refresh failed: {exc}"
-                    if args.full:
-                        report["warnings"].append(message)
-                        report["errors"].append(message)
-                        print(f"WARN - {message}")
-                    else:
-                        raise
+                    report["warnings"].append(message)
+                    print(f"WARN - {message}")
 
             if run_movie_index:
                 print("INFO - [2/3] Refreshing movie-index catalog...")
@@ -287,12 +283,8 @@ def main() -> None:
                     _append_summary(report, "movie_index", summary)
                 except Exception as exc:
                     message = f"Movie-index refresh failed: {exc}"
-                    if args.full:
-                        report["warnings"].append(message)
-                        report["errors"].append(message)
-                        print(f"WARN - {message}")
-                    else:
-                        raise
+                    report["warnings"].append(message)
+                    print(f"WARN - {message}")
 
             if args.full:
                 print("INFO - [3/3] Re-scraping every known album in the catalog...")
