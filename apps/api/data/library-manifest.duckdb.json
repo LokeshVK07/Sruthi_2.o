@@ -1,9 +1,9 @@
 {
-  "albums": 13,
+  "albums": 4701,
   "download_url": "https://github.com/LokeshVK07/Sruthi_2.o/releases/download/local-library/vibe2o-library.duckdb",
-  "sha256": "50d7f6ce5a75169ad1555993ef1185f4c1521c8439ff0c195e09f84ecf4aa863",
-  "size": 6303744,
-  "songs": 46,
-  "updated_at": "2026-05-01T17:00:48Z",
-  "version": "2026-05-01T17:00:48Z"
+  "sha256": "09cf0c477bb71b2042832b833e5758746f8b83bf9095e63e67227a18af9d9198",
+  "size": 7614464,
+  "songs": 27415,
+  "updated_at": "2026-05-05T06:45:32Z",
+  "version": "2026-05-05T06:45:32Z"
 }
