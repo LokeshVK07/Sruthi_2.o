@@ -27,8 +27,6 @@ The workflow refreshes a temporary SQLite working snapshot first, validates it, 
 
 - the refreshed SQLite snapshot to the `library-snapshot` GitHub Release
 - the updated manifest at `apps/api/data/library-manifest.json`
-- a refreshed DuckDB library to the `local-library` GitHub Release
-- a DuckDB manifest at `apps/api/data/library-manifest.duckdb.json`
 
 Safety guarantees:
 
@@ -50,7 +48,6 @@ Safety guarantees:
 - [apps/server](/Users/lokesh/Sruthi%202.o/apps/server): older temporary Node backend kept only for reference
 - [.github/workflows/background-refresh.yml](/Users/lokesh/Sruthi%202.o/.github/workflows/background-refresh.yml): GitHub Actions snapshot producer
 - [scripts/publish_snapshot_manifest.py](/Users/lokesh/Sruthi%202.o/scripts/publish_snapshot_manifest.py): manifest builder
-- [scripts/publish_library.py](/Users/lokesh/Sruthi%202.o/scripts/publish_library.py): SQLite → DuckDB publisher and DuckDB manifest builder
 
 ## Local setup
 
@@ -144,14 +141,16 @@ The workflow in [.github/workflows/background-refresh.yml](/Users/lokesh/Sruthi%
   - `publish_ref`
 - downloads the currently published SQLite snapshot using `apps/api/data/library-manifest.json`
 - refreshes that downloaded DB so old shared catalog data is preserved instead of discarded
+- in `full_scan=true` mode it:
+  - walks the full paginated listing catalog
+  - walks generated movie-index alphabet and browse-by-year sections
+  - re-scrapes every known album URL already stored in the catalog so all tracks are refreshed, not just new discovery pages
 - validates the refreshed SQLite DB
 - builds the web app before publish
 - publishes:
   - `vibe2o-library.sqlite3` to the `library-snapshot` release
-  - `vibe2o-library.duckdb` to the `local-library` release
 - rewrites and commits only:
   - [apps/api/data/library-manifest.json](/Users/lokesh/Sruthi%202.o/apps/api/data/library-manifest.json)
-  - [apps/api/data/library-manifest.duckdb.json](/Users/lokesh/Sruthi%202.o/apps/api/data/library-manifest.duckdb.json)
 - retries git push using fetch + rebase if the branch moved
 
 ### Consumer
@@ -243,5 +242,6 @@ Most important values:
 - `MASSTAMILAN_LIST_PATH`
 - `MASSTAMILAN_MAX_PAGES`
 - `MAX_CACHE_SIZE_MB`
+- `REFRESH_INTERVAL_SECONDS`
 - `STREAM_PREFETCH_LIMIT`
 - `WARMUP_BATCH_SIZE`

@@ -21,6 +21,15 @@ def merge_counts(*summaries: ScrapeSummary) -> dict[str, object]:
     }
 
 
+def ensure_full_refresh_progress(*summaries: ScrapeSummary) -> None:
+    pages_scraped = sum(summary.pages_scraped for summary in summaries)
+    albums_processed = sum(summary.albums_new + summary.albums_updated for summary in summaries)
+    if pages_scraped <= 0:
+        raise RuntimeError("Full refresh aborted because no discovery pages were scraped")
+    if albums_processed <= 0:
+        raise RuntimeError("Full refresh aborted because no albums were processed")
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument(
@@ -52,7 +61,7 @@ def main() -> None:
     print("=" * 64)
 
     if run_pagewise:
-        print("INFO - [1/2] Refreshing page-wise listings...")
+        print("INFO - [1/3] Refreshing page-wise listings...")
         summaries.append(
             site_scraper.scrape_site(
                 incremental=not args.full,
@@ -61,7 +70,7 @@ def main() -> None:
         )
 
     if run_movie_index:
-        print("INFO - [2/2] Refreshing movie-index catalog...")
+        print("INFO - [2/3] Refreshing movie-index catalog...")
         try:
             summaries.append(
                 site_scraper.scrape_movie_index(
@@ -70,6 +79,8 @@ def main() -> None:
                 )
             )
         except ChallengeError:
+            if args.full:
+                raise
             summaries.append(
                 ScrapeSummary(
                     run_id="movie-index-skipped",
@@ -81,6 +92,11 @@ def main() -> None:
                     status="skipped",
                 )
             )
+
+    if args.full:
+        print("INFO - [3/3] Re-scraping every known album in the catalog...")
+        summaries.append(site_scraper.rescrape_catalog())
+        ensure_full_refresh_progress(*summaries)
 
     print(json.dumps(merge_counts(*summaries), indent=2))
 

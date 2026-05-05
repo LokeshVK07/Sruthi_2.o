@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+from datetime import datetime
 
 
 ROOT_DIR = Path(__file__).resolve().parents[3]
@@ -25,7 +26,7 @@ LOCAL_REFRESH_MANIFEST_PATH = Path(
 DEFAULT_REFRESH_MANIFEST_URL = "https://raw.githubusercontent.com/LokeshVK07/Sruthi_2.o/main/apps/api/data/library-manifest.json"
 REFRESH_ENABLED = os.getenv("REFRESH_ENABLED", "true").strip().lower() not in {"0", "false", "no", "off"}
 REFRESH_MANIFEST_URL = os.getenv("REFRESH_MANIFEST_URL", DEFAULT_REFRESH_MANIFEST_URL).strip()
-REFRESH_INTERVAL_SECONDS = int(os.getenv("REFRESH_INTERVAL_SECONDS", "21600"))
+REFRESH_INTERVAL_SECONDS = int(os.getenv("REFRESH_INTERVAL_SECONDS", "1800"))
 REFRESH_TIMEOUT_SECONDS = float(os.getenv("REFRESH_TIMEOUT_SECONDS", "60"))
 MAX_CACHE_SIZE_MB = int(os.getenv("MAX_CACHE_SIZE_MB", "4096"))
 MIN_CACHE_FILE_BYTES = int(os.getenv("MIN_CACHE_FILE_BYTES", "65536"))
@@ -36,6 +37,8 @@ SITE_BASE_URL = os.getenv("MASSTAMILAN_BASE_URL", "https://www.masstamilan.dev")
 SITE_LIST_PATH = os.getenv("MASSTAMILAN_LIST_PATH", "/tamil-songs")
 SITE_MAX_PAGES = int(os.getenv("MASSTAMILAN_MAX_PAGES", "481"))
 SCRAPER_DELAY_SECONDS = float(os.getenv("MASSTAMILAN_DELAY_SECONDS", "0.2"))
+MOVIE_INDEX_MIN_YEAR = int(os.getenv("MASSTAMILAN_MIN_YEAR", "1930"))
+MOVIE_INDEX_MAX_YEAR = int(os.getenv("MASSTAMILAN_MAX_YEAR", str(datetime.utcnow().year)))
 
 for directory in [
     DATABASE_PATH.parent,

@@ -1,4 +1,4 @@
-name: Refresh DuckDB Library
+name: Refresh Library Snapshot
 
 on:
   schedule:
@@ -91,19 +91,15 @@ jobs:
       - name: Resolve workflow paths
         run: |
           echo "WORKING_SQLITE_DB=${GITHUB_WORKSPACE}/data/melodify.sqlite3" >> "$GITHUB_ENV"
-          echo "GENERATED_SQLITE_MANIFEST=${GITHUB_WORKSPACE}/.github/.generated/background-refresh/library-manifest.json" >> "$GITHUB_ENV"
-          echo "GENERATED_DUCKDB_MANIFEST=${GITHUB_WORKSPACE}/.github/.generated/background-refresh/library-manifest.duckdb.json" >> "$GITHUB_ENV"
+          echo "GENERATED_MANIFEST=${GITHUB_WORKSPACE}/.github/.generated/background-refresh/library-manifest.json" >> "$GITHUB_ENV"
           echo "VALIDATION_SUMMARY=${GITHUB_WORKSPACE}/.github/.generated/background-refresh/validation-summary.json" >> "$GITHUB_ENV"
-          echo "DUCKDB_OUTPUT=${GITHUB_WORKSPACE}/apps/api/data/melodify.duckdb" >> "$GITHUB_ENV"
 
-      - name: Ensure release targets exist
+      - name: Ensure library release exists
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh release view library-snapshot --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1 || \
             gh release create library-snapshot --repo "${GITHUB_REPOSITORY}" --title "Library Snapshot" --notes "Managed SQLite library snapshot release"
-          gh release view local-library --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1 || \
-            gh release create local-library --repo "${GITHUB_REPOSITORY}" --title "DuckDB Library Snapshot" --notes "Managed DuckDB library snapshot release"
 
       - name: Download current published DB
         run: |
@@ -140,6 +136,42 @@ jobs:
           fi
           retry 2 120 python -m app.scripts.refresh_catalog --mode "${INPUT_SCAN_MODE}" --delay "${INPUT_DELAY}" ${FULL_FLAG}
 
+      - name: Summarize scrape metrics
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          import sqlite3
+
+          db_path = os.environ["WORKING_SQLITE_DB"]
+          conn = sqlite3.connect(db_path)
+          row = conn.execute(
+              """
+              SELECT status, pages_scraped, albums_new, albums_updated, albums_failed, songs_total, started_at, finished_at
+              FROM scrape_runs
+              ORDER BY started_at DESC
+              LIMIT 1
+              """
+          ).fetchone()
+          if row is None:
+              raise SystemExit("No scrape_runs row found after scraper execution")
+          print(
+              json.dumps(
+                  {
+                      "status": row[0],
+                      "pages_scraped": row[1],
+                      "albums_new": row[2],
+                      "albums_updated": row[3],
+                      "albums_failed": row[4],
+                      "songs_total": row[5],
+                      "started_at": row[6],
+                      "finished_at": row[7],
+                  },
+                  indent=2,
+              )
+          )
+          PY
+
       - name: Validate refreshed local catalog files
         run: |
           if [[ ! -f "${WORKING_SQLITE_DB}" ]]; then
@@ -158,51 +190,31 @@ jobs:
       - name: Build app before publish
         run: npm run build
 
-      - name: Publish merged DBs and manifests
+      - name: Build release manifest
         env:
           INPUT_PUBLISH_REF: ${{ github.event.inputs.publish_ref || 'main' }}
         run: |
           VERSION="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
           python scripts/publish_snapshot_manifest.py \
             --db-path "${WORKING_SQLITE_DB}" \
-            --manifest-path "${GENERATED_SQLITE_MANIFEST}" \
+            --manifest-path "${GENERATED_MANIFEST}" \
             --download-url "https://github.com/${GITHUB_REPOSITORY}/releases/download/library-snapshot/vibe2o-library.sqlite3" \
             --version "${VERSION}"
-          python scripts/publish_library.py \
-            --db-path "${WORKING_SQLITE_DB}" \
-            --output-db "${DUCKDB_OUTPUT}" \
-            --manifest "${GENERATED_DUCKDB_MANIFEST}" \
-            --repo "${GITHUB_REPOSITORY}" \
-            --ref "${INPUT_PUBLISH_REF}" \
-            --version "${VERSION}"
 
-      - name: Upload release assets
+      - name: Upload release asset
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh release upload library-snapshot "${WORKING_SQLITE_DB}#vibe2o-library.sqlite3" --repo "${GITHUB_REPOSITORY}" --clobber
-          gh release upload local-library "${DUCKDB_OUTPUT}#vibe2o-library.duckdb" --repo "${GITHUB_REPOSITORY}" --clobber
 
-      - name: Rewrite DuckDB manifest URL
+      - name: Publish committed manifest
         run: |
-          python - <<'PY'
-          import json
-          from pathlib import Path
-          manifest_path = Path(".github/.generated/background-refresh/library-manifest.duckdb.json")
-          manifest = json.loads(manifest_path.read_text())
-          manifest["download_url"] = "https://github.com/${{ github.repository }}/releases/download/local-library/vibe2o-library.duckdb"
-          manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
-          PY
-
-      - name: Publish committed manifests
-        run: |
-          cp "${GENERATED_SQLITE_MANIFEST}" apps/api/data/library-manifest.json
-          cp "${GENERATED_DUCKDB_MANIFEST}" apps/api/data/library-manifest.duckdb.json
+          cp "${GENERATED_MANIFEST}" apps/api/data/library-manifest.json
 
       - name: Detect repository changes
         id: changes
         run: |
-          if git diff --quiet -- apps/api/data/library-manifest.json apps/api/data/library-manifest.duckdb.json; then
+          if git diff --quiet -- apps/api/data/library-manifest.json; then
             echo "changed=false" >> "${GITHUB_OUTPUT}"
           else
             echo "changed=true" >> "${GITHUB_OUTPUT}"
@@ -213,8 +225,8 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add apps/api/data/library-manifest.json apps/api/data/library-manifest.duckdb.json
-          git commit -m "chore(data): refresh library manifests"
+          git add apps/api/data/library-manifest.json
+          git commit -m "chore(data): refresh library manifest"
 
       - name: Push refreshed library
         if: steps.changes.outputs.changed == 'true'

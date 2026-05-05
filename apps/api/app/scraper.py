@@ -12,8 +12,22 @@ from bs4 import BeautifulSoup
 from curl_cffi import requests as curl_requests
 from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
 
-from .config import SCRAPER_DELAY_SECONDS, SITE_BASE_URL, SITE_LIST_PATH, SITE_MAX_PAGES
-from .repository import create_scrape_run, finish_scrape_run, known_album_urls, make_album_id, upsert_album
+from .config import (
+    MOVIE_INDEX_MAX_YEAR,
+    MOVIE_INDEX_MIN_YEAR,
+    SCRAPER_DELAY_SECONDS,
+    SITE_BASE_URL,
+    SITE_LIST_PATH,
+    SITE_MAX_PAGES,
+)
+from .repository import (
+    create_scrape_run,
+    finish_scrape_run,
+    known_album_urls,
+    list_album_urls,
+    make_album_id,
+    upsert_album,
+)
 from .schemas import ScrapedAlbum, ScrapedSong, ScrapeSummary
 from .utils import canonicalize_url
 
@@ -104,18 +118,24 @@ class SiteScraper:
         return urls
 
     def discover_movie_index_sections(self) -> dict[str, list[str]]:
+        alphabet = [f"{SITE_BASE_URL}/tag/0-9"]
+        alphabet.extend(f"{SITE_BASE_URL}/tag/{character}" for character in "ABCDEFGHIJKLMNOPQRSTUVWXYZ")
+        years = [f"{SITE_BASE_URL}/browse-by-year/{year}" for year in range(MOVIE_INDEX_MAX_YEAR, MOVIE_INDEX_MIN_YEAR - 1, -1)]
+
         url = f"{SITE_BASE_URL}/movie-index"
-        html = self.fetch_html(url)
-        soup = BeautifulSoup(html, "lxml")
-        alphabet: list[str] = []
-        years: list[str] = []
-        for anchor in soup.select("a[href]"):
-            href = anchor.get("href", "")
-            absolute = canonicalize_url(urljoin(url, href))
-            if "/tag/" in absolute and absolute not in alphabet:
-                alphabet.append(absolute)
-            elif "/browse-by-year/" in absolute and absolute not in years:
-                years.append(absolute)
+        try:
+            html = self.fetch_html(url)
+            soup = BeautifulSoup(html, "lxml")
+            for anchor in soup.select("a[href]"):
+                href = anchor.get("href", "")
+                absolute = canonicalize_url(urljoin(url, href))
+                if "/tag/" in absolute and absolute not in alphabet:
+                    alphabet.append(absolute)
+                elif "/browse-by-year/" in absolute and absolute not in years:
+                    years.append(absolute)
+        except ChallengeError:
+            print("[scrape:index] movie-index landing page challenged; falling back to generated sections")
+
         return {"alphabet": alphabet, "years": years}
 
     def _section_page_url(self, section_url: str, page_number: int) -> str:
@@ -296,6 +316,64 @@ class SiteScraper:
     def scrape_album_url(self, album_url: str) -> ScrapedAlbum:
         return self.parse_album(album_url)
 
+    def rescrape_catalog(self, batch_size: int = 20) -> ScrapeSummary:
+        run_id = create_scrape_run()
+        album_urls = list_album_urls()
+        albums_new = 0
+        albums_updated = 0
+        albums_failed = 0
+        songs_total = 0
+        status = "success"
+        try:
+            total = len(album_urls)
+            if total == 0:
+                raise RuntimeError("No existing album URLs are available for full catalog rescrape")
+
+            for batch_start in range(0, total, batch_size):
+                batch = album_urls[batch_start : batch_start + batch_size]
+                batch_number = batch_start // batch_size + 1
+                print(f"INFO - Batch {batch_number} (refresh): Processing {len(batch)} albums...")
+                for index, album_url in enumerate(batch, start=1):
+                    print(f"INFO - [{index}/{len(batch)}] {album_url}")
+                    try:
+                        album = self.parse_album(album_url)
+                        is_new, songs = upsert_album(album)
+                        if is_new:
+                            albums_new += 1
+                        else:
+                            albums_updated += 1
+                        songs_total += songs
+                        print(f"INFO - -> {album.album_name} | {songs} track(s)")
+                    except Exception as exc:
+                        albums_failed += 1
+                        print(f"INFO - -> failed {album_url}: {exc}")
+
+            if albums_new + albums_updated == 0:
+                raise RuntimeError("Full catalog rescrape did not refresh any albums")
+
+            return ScrapeSummary(
+                run_id=run_id,
+                pages_scraped=0,
+                albums_new=albums_new,
+                albums_updated=albums_updated,
+                albums_failed=albums_failed,
+                songs_total=songs_total,
+                status=status,
+            )
+        except Exception:
+            status = "failed"
+            raise
+        finally:
+            finish_scrape_run(
+                run_id,
+                pages_scraped=0,
+                albums_new=albums_new,
+                albums_updated=albums_updated,
+                albums_failed=albums_failed,
+                songs_total=songs_total,
+                status=status,
+            )
+
     def scrape_site(self, page_from: int = 1, page_to: int | None = None, incremental: bool = False, full_scan: bool = False) -> ScrapeSummary:
         page_to = page_to or SITE_MAX_PAGES
         run_id = create_scrape_run()
@@ -309,13 +387,17 @@ class SiteScraper:
             for page_number in range(page_from, page_to + 1):
                 try:
                     urls = self.discover_listing(page_number)
-                except Exception:
+                except Exception as exc:
+                    if full_scan:
+                        raise RuntimeError(f"Listing discovery failed at page {page_number}: {exc}") from exc
                     break
                 if not urls:
+                    if full_scan and page_number == page_from:
+                        raise RuntimeError("Listing discovery returned no albums on the first page during full scan")
                     break
                 pages_scraped += 1
                 known = known_album_urls(urls)
-                print(f"[scrape] listing {page_number}: discovered={len(urls)} known={len(known)}")
+                print(f"INFO - Listing page {page_number}: {len(urls)} albums, {max(len(urls) - len(known), 0)} new")
                 if incremental and not full_scan and len(urls) == len(known):
                     print(f"[scrape] stopping early at listing {page_number} because the full page is already known")
                     break
@@ -334,6 +416,8 @@ class SiteScraper:
                     except Exception as exc:
                         albums_failed += 1
                         print(f"[scrape] album failed {album_url}: {exc}")
+            if full_scan and pages_scraped == 0:
+                raise RuntimeError("Full listing scan completed without scraping any pages")
             return ScrapeSummary(
                 run_id=run_id,
                 pages_scraped=pages_scraped,
@@ -395,10 +479,7 @@ class SiteScraper:
                         break
                     pages_scraped += 1
                     known = known_album_urls(urls)
-                    print(
-                        f"[scrape:index] section {section_label} page={page_number}: "
-                        f"discovered={len(urls)} known={len(known)} max_page={max_page}"
-                    )
+                    print(f"INFO - Movie index page {page_number}: {len(urls)} albums, {max(len(urls) - len(known), 0)} new")
                     if incremental and not full_scan and len(urls) == len(known):
                         print(f"[scrape:index] stopping early for {section_label} page={page_number} because the full page is already known")
                         break
@@ -420,6 +501,9 @@ class SiteScraper:
                     if page_number >= max_page:
                         break
                     page_number += 1
+
+            if full_scan and pages_scraped == 0:
+                raise RuntimeError("Full movie-index scan completed without scraping any pages")
 
             return ScrapeSummary(
                 run_id=run_id,

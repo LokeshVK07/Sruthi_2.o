@@ -60,6 +60,17 @@ def known_album_urls(urls: list[str]) -> set[str]:
     return {row[0] for row in rows}
 
 
+def list_album_urls() -> list[str]:
+    rows = get_connection().execute(
+        """
+        SELECT album_url
+        FROM albums
+        ORDER BY updated_at DESC, album_name ASC
+        """
+    ).fetchall()
+    return [str(row[0]) for row in rows]
+
+
 def upsert_album(album: ScrapedAlbum) -> tuple[bool, int]:
     conn = get_connection()
     album_url = canonicalize_url(album.album_url)
