@@ -206,8 +206,11 @@ class SiteScraper:
         candidate_selectors = (
             "article a[href]",
             ".entry-content a[href]",
+            ".entry-title a[href]",
+            ".inside-article a[href]",
             ".post a[href]",
             ".card a[href]",
+            "main a[href]",
             "h1 a[href], h2 a[href], h3 a[href]",
             "a[href]",
         )
@@ -216,14 +219,18 @@ class SiteScraper:
         for selector in candidate_selectors:
             for anchor in soup.select(selector):
                 href = anchor.get("href", "")
-                if "-songs" not in href or "/tamil-songs" in href:
-                    continue
                 absolute = canonicalize_url(urljoin(base_url, href))
+                parsed = urlparse(absolute)
+                path = parsed.path.lower()
+                if parsed.netloc and urlparse(SITE_BASE_URL).netloc not in parsed.netloc:
+                    continue
+                if "-songs" not in path:
+                    continue
+                if any(fragment in path for fragment in ("/tamil-songs", "/movie-index", "/tag/", "/browse-by-year/", "/search", "/playlists", "-mp3-song", "/downloader/")):
+                    continue
                 if absolute not in seen:
                     seen.add(absolute)
                     urls.append(absolute)
-            if urls:
-                break
         return urls
 
     def discover_movie_index_sections(self, report: dict[str, Any] | None = None) -> dict[str, list[str]]:
@@ -363,6 +370,42 @@ class SiteScraper:
         text = re.sub(r"\b(128kbps|320kbps|download song|free download)\b", "", text, flags=re.I)
         return normalize(text)
 
+    def _heading_track_blocks(self, soup: BeautifulSoup) -> list[Any]:
+        candidates = soup.select(".entry-content h2, .entry-content h3, article h2, article h3, main h2, main h3")
+        blocks: list[Any] = []
+        for node in candidates:
+            text = normalize(node.get_text(" ", strip=True))
+            lowered = text.lower()
+            if not text:
+                continue
+            if lowered.startswith("download "):
+                continue
+            if "songs download masstamilan.com" in lowered:
+                continue
+            if lowered in {"movie information", "incoming search terms", "latest from masstamilan.com", "trending at masstamilan.com"}:
+                continue
+            blocks.append(node)
+        return blocks
+
+    def _adjacent_text(self, node: Any) -> str:
+        values: list[str] = []
+        for sibling in node.next_siblings:
+            name = getattr(sibling, "name", None)
+            if name in {"h1", "h2", "h3", "h4"}:
+                break
+            text = normalize(sibling.get_text(" ", strip=True) if hasattr(sibling, "get_text") else str(sibling))
+            if text:
+                values.append(text)
+            if len(values) >= 6:
+                break
+        return normalize(" ".join(values))
+
+    def _extract_inline_label(self, text: str, label: str) -> str | None:
+        match = re.search(rf"{re.escape(label)}\s*:\s*(.+?)(?:\s+(?:Length|Downloads)\s*:|$)", text, flags=re.I)
+        if not match:
+            return None
+        return normalize(match.group(1))
+
     def _album_title(self, soup: BeautifulSoup) -> str:
         selectors = (
             "h1",
@@ -404,6 +447,8 @@ class SiteScraper:
         music_blocks = row_blocks if row_blocks else soup.select(
             'span[itemtype="http://schema.org/MusicRecording"], li[itemprop="itemListElement"], .tracklist li, .entry-content li'
         )
+        if not music_blocks:
+            music_blocks = self._heading_track_blocks(soup)
         for idx, block in enumerate(music_blocks, start=1):
             block_scope = block.select_one('span[itemtype="http://schema.org/MusicRecording"]') if row_blocks else block
             block_scope = block_scope or block
@@ -420,6 +465,7 @@ class SiteScraper:
             elif anchor and anchor.get("href"):
                 track_detail_url = urljoin(album_url, anchor.get("href"))
             singers_node = block_scope.select_one('[itemprop="byArtist"]')
+            adjacent_text = self._adjacent_text(block_scope)
             links = self._row_track_links(block, album_url) if row_blocks else {}
             if not links and track_detail_url:
                 links = self._track_links(track_detail_url, referer=album_url)
@@ -428,7 +474,7 @@ class SiteScraper:
                 ScrapedSong(
                     track_name=track_name,
                     track_number=idx,
-                    singers=normalize(singers_node.get_text(" ", strip=True)) if singers_node else artist,
+                    singers=normalize(singers_node.get_text(" ", strip=True)) if singers_node else self._extract_inline_label(adjacent_text, "Singers") or artist,
                     image_url=inline_image,
                     url_128kbps=links.get("128"),
                     url_320kbps=links.get("320") or links.get("default"),

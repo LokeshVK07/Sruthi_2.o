@@ -4,11 +4,14 @@ import sqlite3
 import threading
 from contextlib import contextmanager
 from pathlib import Path
+import os
 
 from .config import DATABASE_PATH
 
 
 _local = threading.local()
+_repair_lock = threading.Lock()
+_db_ready = False
 
 SCHEMA_SQL = """
         CREATE TABLE IF NOT EXISTS albums (
@@ -126,6 +129,7 @@ def connect_to(path: Path) -> sqlite3.Connection:
 def get_connection() -> sqlite3.Connection:
     conn = getattr(_local, "conn", None)
     if conn is None:
+        ensure_database_ready()
         conn = connect_to(DATABASE_PATH)
         _local.conn = conn
     return conn
@@ -141,6 +145,139 @@ def close_connection() -> None:
         _local.conn = None
 
 
+def _integrity_status(path: Path) -> str:
+    if not path.exists():
+        return "missing"
+    connection = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+    try:
+        row = connection.execute("PRAGMA integrity_check").fetchone()
+        if not row:
+            return "missing integrity result"
+        return str(row[0])
+    except Exception as exc:
+        return str(exc)
+    finally:
+        connection.close()
+
+
+def _table_columns(connection: sqlite3.Connection, table: str, schema: str | None = None) -> list[str]:
+    pragma = f"PRAGMA {schema}.table_info('{table}')" if schema else f"PRAGMA table_info('{table}')"
+    rows = connection.execute(pragma).fetchall()
+    return [str(row[1]) for row in rows]
+
+
+def _copy_table_rows(connection: sqlite3.Connection, source_schema: str, target_table: str, *, replace: bool = False) -> None:
+    source_columns = _table_columns(connection, target_table, source_schema)
+    target_columns = _table_columns(connection, target_table)
+    columns = [column for column in target_columns if column in source_columns]
+    if not columns:
+        return
+    command = "INSERT OR REPLACE" if replace else "INSERT OR IGNORE"
+    joined = ", ".join(columns)
+    connection.execute(
+        f"{command} INTO {target_table} ({joined}) SELECT {joined} FROM {source_schema}.{target_table}"
+    )
+
+
+def _remove_sqlite_sidecars(path: Path) -> None:
+    for suffix in ("-wal", "-shm"):
+        path.with_name(f"{path.name}{suffix}").unlink(missing_ok=True)
+
+
+def _repair_database_from_backup(path: Path, backup_path: Path) -> bool:
+    if not backup_path.exists() or _integrity_status(backup_path).lower() != "ok":
+        return False
+
+    repaired_path = path.with_suffix(".repaired.sqlite3")
+    corrupt_backup_path = path.with_suffix(".corrupt.sqlite3")
+    repaired_path.unlink(missing_ok=True)
+    corrupt_backup_path.unlink(missing_ok=True)
+
+    repaired = sqlite3.connect(str(repaired_path), isolation_level=None)
+    repaired.row_factory = sqlite3.Row
+    try:
+        repaired.executescript(SCHEMA_SQL)
+        repaired.execute("ATTACH DATABASE ? AS snapshot_backup", [str(backup_path)])
+        repaired.execute("BEGIN IMMEDIATE")
+        for table in (
+            "albums",
+            "songs",
+            "scrape_runs",
+            "users",
+            "sessions",
+            "favorites",
+            "playlists",
+            "playlist_songs",
+            "user_preferences",
+            "recently_played",
+        ):
+            _copy_table_rows(repaired, "snapshot_backup", table)
+        repaired.commit()
+
+        try:
+            repaired.execute("ATTACH DATABASE ? AS corrupt_live", [str(path)])
+            repaired.execute("BEGIN IMMEDIATE")
+            for table in ("users", "sessions", "favorites", "playlists", "playlist_songs", "user_preferences", "recently_played"):
+                try:
+                    _copy_table_rows(repaired, "corrupt_live", table, replace=True)
+                except Exception:
+                    continue
+            repaired.commit()
+        except Exception:
+            repaired.rollback()
+        finally:
+            try:
+                repaired.execute("DETACH DATABASE corrupt_live")
+            except Exception:
+                pass
+    finally:
+        try:
+            repaired.execute("DETACH DATABASE snapshot_backup")
+        except Exception:
+            pass
+        repaired.close()
+
+    if _integrity_status(repaired_path).lower() != "ok":
+        repaired_path.unlink(missing_ok=True)
+        return False
+    validation = sqlite3.connect(f"file:{repaired_path}?mode=ro", uri=True)
+    try:
+        albums = int(validation.execute("SELECT COUNT(*) FROM albums").fetchone()[0] or 0)
+        songs = int(validation.execute("SELECT COUNT(*) FROM songs").fetchone()[0] or 0)
+    finally:
+        validation.close()
+    if albums <= 0 or songs <= 0:
+        repaired_path.unlink(missing_ok=True)
+        return False
+
+    _remove_sqlite_sidecars(path)
+    if path.exists():
+        os.replace(path, corrupt_backup_path)
+        _remove_sqlite_sidecars(corrupt_backup_path)
+    os.replace(repaired_path, path)
+    _remove_sqlite_sidecars(repaired_path)
+    return True
+
+
+def ensure_database_ready() -> None:
+    global _db_ready
+    if _db_ready:
+        return
+    with _repair_lock:
+        if _db_ready:
+            return
+        status = _integrity_status(DATABASE_PATH)
+        if status not in {"missing", "ok"}:
+            close_connection()
+            backup_path = DATABASE_PATH.with_suffix(".snapshot-backup.sqlite3")
+            repaired = _repair_database_from_backup(DATABASE_PATH, backup_path)
+            if repaired:
+                status = _integrity_status(DATABASE_PATH)
+        if status not in {"missing", "ok"}:
+            raise RuntimeError(f"Catalog database failed integrity check: {status}")
+        _db_ready = True
+
+
 @contextmanager
 def transaction():
     conn = get_connection()
@@ -154,6 +291,7 @@ def transaction():
 
 
 def init_db() -> None:
+    ensure_database_ready()
     conn = get_connection()
     conn.executescript(SCHEMA_SQL)
 

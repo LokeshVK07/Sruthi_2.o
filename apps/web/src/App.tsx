@@ -207,12 +207,21 @@ export default function App() {
   const librarySongs = songs?.items ?? [];
   const favoriteSongs = favorites?.items?.length ? favorites.items : home?.favorites ?? [];
   const albumItems = albums?.items ?? [];
-  const fullLibrary = home?.library?.length ? home.library : librarySongs;
+  const fullLibrary = librarySongs.length ? librarySongs : home?.library ?? [];
   const localSearchResults = useMemo(
     () => (deferredQuery ? fullLibrary.filter((song) => titleMatches(song, deferredQuery)) : []),
     [fullLibrary, deferredQuery]
   );
-  const searchSongResults = deferredQuery ? (searchData?.items?.length ? searchData.items : localSearchResults) : [];
+  const searchSongResults = useMemo(() => {
+    if (!deferredQuery) return [];
+    const merged = [...(searchData?.items ?? []), ...localSearchResults];
+    const seen = new Set<string>();
+    return merged.filter((song) => {
+      if (!song?.id || seen.has(song.id)) return false;
+      seen.add(song.id);
+      return true;
+    });
+  }, [deferredQuery, localSearchResults, searchData?.items]);
   const currentSong = queue[currentIndex] ?? pickInitialSong(fullLibrary);
   const recentSongs = useMemo(
     () =>
@@ -293,6 +302,17 @@ export default function App() {
   function activateSongDeck(song: Song, shouldPlay: boolean) {
     const activeDeck = getActiveDeck();
     const inactiveDeck = getInactiveDeck();
+    if (deckHasSong(activeDeck, song)) {
+      setBuffering(false);
+      if (shouldPlay && activeDeck) {
+        activeDeck.muted = isMuted;
+        activeDeck.volume = isMuted ? 0 : volume;
+        void safePlay(activeDeck);
+        recordPlayback.mutate(song.id);
+        prefetchRelated.mutate(song.id);
+      }
+      return;
+    }
     setCurrentTime(0);
     setDuration(song.durationSeconds && song.durationSeconds > 0 ? song.durationSeconds : 0);
     setBuffering(true);
@@ -300,15 +320,17 @@ export default function App() {
 
     const nextDeckIndex = activeDeckIndex === 0 ? 1 : 0;
     inactiveDeck.pause();
-    inactiveDeck.dataset.songId = song.id;
-    inactiveDeck.src = songStreamUrl(song);
-    debugPlayback("set-src", song.id, inactiveDeck.src);
-    inactiveDeck.preload = "auto";
+    if (!deckHasSong(inactiveDeck, song)) {
+      inactiveDeck.dataset.songId = song.id;
+      inactiveDeck.src = songStreamUrl(song);
+      debugPlayback("set-src", song.id, inactiveDeck.src);
+      inactiveDeck.preload = "auto";
+      inactiveDeck.load();
+      debugPlayback("load-called", song.id);
+    }
     inactiveDeck.currentTime = 0;
     inactiveDeck.muted = isMuted;
     inactiveDeck.volume = isMuted ? 0 : volume;
-    inactiveDeck.load();
-    debugPlayback("load-called", song.id);
 
     if (activeDeck) {
       activeDeck.pause();

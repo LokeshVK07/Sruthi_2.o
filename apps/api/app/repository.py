@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import sqlite3
 from typing import Any
 
-from .db import get_connection, transaction
+from .config import DATABASE_PATH
+from .db import ensure_database_ready, get_connection, transaction
 from .schemas import AlbumRecord, FrontendSong, PlaylistSummary, PublicSong, ScrapedAlbum, SongRecord, SongStatus
 from .utils import canonicalize_url, deterministic_id, now_utc, slugify
 
@@ -194,6 +196,60 @@ def _favorite_song_ids(user_id: str = DEFAULT_USER_ID) -> set[str]:
     return {row[0] for row in rows}
 
 
+def _backup_database_path() -> Any:
+    return DATABASE_PATH.with_suffix(".snapshot-backup.sqlite3")
+
+
+def _read_backup_rows(query: str, params: list[Any]) -> list[sqlite3.Row]:
+    backup_path = _backup_database_path()
+    if not backup_path.exists():
+        return []
+    connection = sqlite3.connect(f"file:{backup_path}?mode=ro", uri=True)
+    connection.row_factory = sqlite3.Row
+    try:
+        return connection.execute(query, params).fetchall()
+    except Exception:
+        return []
+    finally:
+        connection.close()
+
+
+def _song_projection_query(where_clause: str) -> str:
+    return f"""
+        SELECT song_id, album_id, album_name, year, music_director, singers, track_number, track_name, image_url, updated_at
+        FROM songs
+        WHERE {where_clause}
+    """
+
+
+def _song_row_by_id(song_id: str) -> sqlite3.Row | None:
+    row = get_connection().execute(_song_projection_query("song_id = ?"), [song_id]).fetchone()
+    if row:
+        return row
+    rows = _read_backup_rows(_song_projection_query("song_id = ?"), [song_id])
+    return rows[0] if rows else None
+
+
+def _song_rows_by_ids(song_ids: list[str]) -> dict[str, Any]:
+    if not song_ids:
+        return {}
+    placeholders = ",".join("?" for _ in song_ids)
+    rows = get_connection().execute(
+        _song_projection_query(f"song_id IN ({placeholders})"),
+        song_ids,
+    ).fetchall()
+    mapped = {str(row[0]): row for row in rows}
+    missing = [song_id for song_id in song_ids if song_id not in mapped]
+    if missing:
+        backup_rows = _read_backup_rows(
+            _song_projection_query(f"song_id IN ({','.join('?' for _ in missing)})"),
+            missing,
+        )
+        for row in backup_rows:
+            mapped.setdefault(str(row[0]), row)
+    return mapped
+
+
 def _map_public_song(row, favorite_ids: set[str] | None = None) -> FrontendSong:
     favorite_ids = favorite_ids or set()
     public = PublicSong(
@@ -331,38 +387,50 @@ def album_song_ids(album_id: str, limit: int | None = None) -> list[str]:
 
 
 def get_song(song_id: str) -> SongRecord | None:
+    ensure_database_ready()
     conn = get_connection()
     row = conn.execute("SELECT * FROM songs WHERE song_id = ?", [song_id]).fetchone()
+    if not row:
+        backup_rows = _read_backup_rows("SELECT * FROM songs WHERE song_id = ?", [song_id])
+        row = backup_rows[0] if backup_rows else None
     if not row:
         return None
     return SongRecord(**dict(row))
 
 
 def get_frontend_song(song_id: str, user_id: str = DEFAULT_USER_ID) -> FrontendSong | None:
-    row = get_connection().execute(
-        """
-        SELECT song_id, album_id, album_name, year, music_director, singers, track_number, track_name, image_url, updated_at
-        FROM songs
-        WHERE song_id = ?
-        """,
-        [song_id],
-    ).fetchone()
+    ensure_database_ready()
+    row = _song_row_by_id(song_id)
     if not row:
         return None
     return _map_public_song(row, _favorite_song_ids(user_id))
 
 
 def search_songs(query: str, limit: int = 100) -> list[PublicSong]:
-    q = f"%{query.lower()}%"
+    normalized = query.strip().lower()
+    q = f"%{normalized}%"
+    prefix = f"{normalized}%"
     rows = get_connection().execute(
         """
         SELECT song_id, album_id, album_name, year, music_director, singers, track_number, track_name, image_url, updated_at
         FROM songs
         WHERE lower(track_name) LIKE ? OR lower(album_name) LIKE ? OR lower(coalesce(singers,'')) LIKE ? OR lower(coalesce(music_director,'')) LIKE ?
-        ORDER BY updated_at DESC
+        ORDER BY
+          CASE
+            WHEN lower(track_name) = ? THEN 0
+            WHEN lower(track_name) LIKE ? THEN 1
+            WHEN lower(album_name) = ? THEN 2
+            WHEN lower(album_name) LIKE ? THEN 3
+            WHEN lower(coalesce(singers,'')) LIKE ? THEN 4
+            WHEN lower(coalesce(music_director,'')) LIKE ? THEN 5
+            ELSE 6
+          END,
+          updated_at DESC,
+          album_name ASC,
+          track_number ASC
         LIMIT ?
         """,
-        [q, q, q, q, limit],
+        [q, q, q, q, normalized, prefix, normalized, prefix, prefix, prefix, limit],
     ).fetchall()
     return [
         PublicSong(
@@ -383,16 +451,30 @@ def search_songs(query: str, limit: int = 100) -> list[PublicSong]:
 
 
 def search_frontend_songs(query: str, limit: int = 100, user_id: str = DEFAULT_USER_ID) -> list[FrontendSong]:
-    q = f"%{query.lower()}%"
+    normalized = query.strip().lower()
+    q = f"%{normalized}%"
+    prefix = f"{normalized}%"
     rows = get_connection().execute(
         """
         SELECT song_id, album_id, album_name, year, music_director, singers, track_number, track_name, image_url, updated_at
         FROM songs
         WHERE lower(track_name) LIKE ? OR lower(album_name) LIKE ? OR lower(coalesce(singers,'')) LIKE ? OR lower(coalesce(music_director,'')) LIKE ?
-        ORDER BY updated_at DESC
+        ORDER BY
+          CASE
+            WHEN lower(track_name) = ? THEN 0
+            WHEN lower(track_name) LIKE ? THEN 1
+            WHEN lower(album_name) = ? THEN 2
+            WHEN lower(album_name) LIKE ? THEN 3
+            WHEN lower(coalesce(singers,'')) LIKE ? THEN 4
+            WHEN lower(coalesce(music_director,'')) LIKE ? THEN 5
+            ELSE 6
+          END,
+          updated_at DESC,
+          album_name ASC,
+          track_number ASC
         LIMIT ?
         """,
-        [q, q, q, q, limit],
+        [q, q, q, q, normalized, prefix, normalized, prefix, prefix, prefix, limit],
     ).fetchall()
     favorite_ids = _favorite_song_ids(user_id)
     return [_map_public_song(row, favorite_ids) for row in rows]
@@ -452,19 +534,23 @@ def record_recently_played(song_id: str, user_id: str = DEFAULT_USER_ID) -> bool
 
 
 def list_favorites(limit: int = 200, user_id: str = DEFAULT_USER_ID) -> list[FrontendSong]:
-    rows = get_connection().execute(
+    ensure_database_ready()
+    favorite_rows = get_connection().execute(
         """
-        SELECT s.song_id, s.album_id, s.album_name, s.year, s.music_director, s.singers, s.track_number, s.track_name, s.image_url, s.updated_at
-        FROM favorites f
-        JOIN songs s ON s.song_id = f.song_id
-        WHERE f.user_id = ?
-        ORDER BY f.created_at DESC
+        SELECT song_id
+        FROM favorites
+        WHERE user_id = ?
+        ORDER BY created_at DESC
         LIMIT ?
         """,
         [user_id, limit],
     ).fetchall()
-    favorite_ids = _favorite_song_ids(user_id)
-    return [_map_public_song(row, favorite_ids) for row in rows]
+    ordered_ids = [str(row[0]) for row in favorite_rows]
+    if not ordered_ids:
+        return []
+    song_rows = _song_rows_by_ids(ordered_ids)
+    favorite_ids = set(ordered_ids)
+    return [_map_public_song(song_rows[song_id], favorite_ids) for song_id in ordered_ids if song_id in song_rows]
 
 
 def toggle_favorite(song_id: str, user_id: str = DEFAULT_USER_ID) -> bool:
