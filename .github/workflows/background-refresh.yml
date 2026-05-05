@@ -9,10 +9,14 @@ on:
         description: "Scrape mode passed to refresh_catalog.py"
         required: false
         default: "all"
-      full_scan:
-        description: "Run in full scan mode"
+      full_refresh:
+        description: "Run full catalog refresh"
         required: false
-        default: "true"
+        default: "false"
+        type: choice
+        options:
+          - "false"
+          - "true"
       delay:
         description: "Delay between page fetches"
         required: false
@@ -27,7 +31,7 @@ permissions:
   actions: write
 
 concurrency:
-  group: refresh-library
+  group: catalog-refresh
   cancel-in-progress: false
 
 defaults:
@@ -38,6 +42,10 @@ jobs:
   refresh:
     runs-on: ubuntu-latest
     timeout-minutes: 360
+    env:
+      SRUTHI_FULL_REFRESH: ${{ github.event.inputs.full_refresh || vars.SRUTHI_FULL_REFRESH || 'false' }}
+      SRUTHI_REFRESH_WORKERS: ${{ vars.SRUTHI_REFRESH_WORKERS || '' }}
+      SRUTHI_REFRESH_BATCH_SIZE: ${{ vars.SRUTHI_REFRESH_BATCH_SIZE || '' }}
 
     steps:
       - name: Check out repository
@@ -83,7 +91,6 @@ jobs:
           source /tmp/retry.sh
           retry 3 20 python -m pip install --upgrade pip
           retry 3 30 python -m pip install -r apps/api/requirements.txt
-          retry 2 60 python -m playwright install --with-deps chromium
           retry 3 30 npm install
 
       - name: Ensure data directories exist
@@ -94,6 +101,34 @@ jobs:
           echo "WORKING_SQLITE_DB=${GITHUB_WORKSPACE}/data/melodify.sqlite3" >> "$GITHUB_ENV"
           echo "GENERATED_MANIFEST=${GITHUB_WORKSPACE}/.github/.generated/background-refresh/library-manifest.json" >> "$GITHUB_ENV"
           echo "VALIDATION_SUMMARY=${GITHUB_WORKSPACE}/.github/.generated/background-refresh/validation-summary.json" >> "$GITHUB_ENV"
+          echo "REFRESH_REPORT=${GITHUB_WORKSPACE}/.github/.generated/background-refresh/refresh-report.json" >> "$GITHUB_ENV"
+          echo "REFRESH_LOG=${GITHUB_WORKSPACE}/.github/.generated/background-refresh/refresh.log" >> "$GITHUB_ENV"
+
+      - name: Resolve refresh settings
+        run: |
+          workers="${SRUTHI_REFRESH_WORKERS}"
+          if [ -z "${workers}" ]; then
+            workers="$(python - <<'PY'
+          import os
+          print(max(4, os.cpu_count() or 4))
+          PY
+            )"
+          fi
+          batch_size="${SRUTHI_REFRESH_BATCH_SIZE}"
+          if [ -z "${batch_size}" ]; then
+            batch_size="$((workers * 4))"
+          fi
+          if [ "${SRUTHI_FULL_REFRESH}" = "true" ]; then
+            full_flag="--full"
+          else
+            full_flag=""
+          fi
+          echo "REFRESH_WORKERS=${workers}" >> "$GITHUB_ENV"
+          echo "REFRESH_BATCH_SIZE=${batch_size}" >> "$GITHUB_ENV"
+          echo "FULL_FLAG=${full_flag}" >> "$GITHUB_ENV"
+          echo "Refresh mode: ${SRUTHI_FULL_REFRESH}"
+          echo "Workers: ${workers}"
+          echo "Batch size: ${batch_size}"
 
       - name: Ensure library release exists
         env:
@@ -124,56 +159,31 @@ jobs:
       - name: Run scraper
         env:
           INPUT_SCAN_MODE: ${{ github.event.inputs.scan_mode || 'all' }}
-          INPUT_FULL_SCAN: ${{ github.event.inputs.full_scan || 'true' }}
           INPUT_DELAY: ${{ github.event.inputs.delay || '1.3' }}
           DATABASE_PATH: ${{ env.WORKING_SQLITE_DB }}
-          MASSTAMILAN_USE_PLAYWRIGHT: "true"
-          MASSTAMILAN_PLAYWRIGHT_TIMEOUT_MS: "45000"
+          MASSTAMILAN_USE_PLAYWRIGHT: "false"
         working-directory: apps/api
         run: |
-          source /tmp/retry.sh
-          if [ "${INPUT_FULL_SCAN}" = "true" ]; then
-            FULL_FLAG="--full"
-          else
-            FULL_FLAG=""
-          fi
-          retry 2 120 python -m app.scripts.refresh_catalog --mode "${INPUT_SCAN_MODE}" --delay "${INPUT_DELAY}" ${FULL_FLAG}
+          set -o pipefail
+          python -m app.scripts.refresh_catalog \
+            --mode "${INPUT_SCAN_MODE}" \
+            --delay "${INPUT_DELAY}" \
+            --workers "${REFRESH_WORKERS}" \
+            --batch-size "${REFRESH_BATCH_SIZE}" \
+            --report-path "${REFRESH_REPORT}" \
+            ${FULL_FLAG} 2>&1 | tee "${REFRESH_LOG}"
 
-      - name: Summarize scrape metrics
-        run: |
-          python - <<'PY'
-          import json
-          import os
-          import sqlite3
-
-          db_path = os.environ["WORKING_SQLITE_DB"]
-          conn = sqlite3.connect(db_path)
-          row = conn.execute(
-              """
-              SELECT status, pages_scraped, albums_new, albums_updated, albums_failed, songs_total, started_at, finished_at
-              FROM scrape_runs
-              ORDER BY started_at DESC
-              LIMIT 1
-              """
-          ).fetchone()
-          if row is None:
-              raise SystemExit("No scrape_runs row found after scraper execution")
-          print(
-              json.dumps(
-                  {
-                      "status": row[0],
-                      "pages_scraped": row[1],
-                      "albums_new": row[2],
-                      "albums_updated": row[3],
-                      "albums_failed": row[4],
-                      "songs_total": row[5],
-                      "started_at": row[6],
-                      "finished_at": row[7],
-                  },
-                  indent=2,
-              )
-          )
-          PY
+      - name: Upload refresh artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: refresh-report-${{ github.run_id }}
+          path: |
+            ${{ env.REFRESH_REPORT }}
+            ${{ env.REFRESH_LOG }}
+            ${{ env.VALIDATION_SUMMARY }}
+          if-no-files-found: warn
+          retention-days: 30
 
       - name: Validate refreshed local catalog files
         run: |
@@ -194,8 +204,6 @@ jobs:
         run: npm run build
 
       - name: Build release manifest
-        env:
-          INPUT_PUBLISH_REF: ${{ github.event.inputs.publish_ref || 'main' }}
         run: |
           VERSION="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
           python scripts/publish_snapshot_manifest.py \
@@ -249,10 +257,66 @@ jobs:
           echo "Failed to push after 5 attempts." >&2
           exit 1
 
-      - name: Summarize
+      - name: Summarize refresh
+        if: always()
         run: |
-          if [ "${{ steps.changes.outputs.changed }}" = "true" ]; then
-            echo "Library snapshots changed and manifests were pushed."
-          else
-            echo "Library snapshots unchanged; nothing pushed."
-          fi
+          python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          report_path = Path(os.environ["REFRESH_REPORT"])
+          validation_path = Path(os.environ["VALIDATION_SUMMARY"])
+          summary_path = Path(os.environ["GITHUB_STEP_SUMMARY"])
+
+          report = {}
+          validation = {}
+          if report_path.exists():
+              report = json.loads(report_path.read_text())
+          if validation_path.exists():
+              validation = json.loads(validation_path.read_text())
+
+          summary = report.get("summary", {})
+          lines = []
+          lines.append("# Catalog Refresh Summary")
+          lines.append("")
+          lines.append(f"- Mode: `{report.get('mode', 'unknown')}`")
+          lines.append(f"- Status: `{report.get('status', 'unknown')}`")
+          lines.append(f"- Duration: `{report.get('durationSeconds', 'n/a')}` seconds")
+          lines.append(f"- Listing pages scanned: `{summary.get('listing_pages_scanned', 0)}`")
+          lines.append(f"- Movie index pages scanned: `{summary.get('movie_index_pages_scanned', 0)}`")
+          lines.append(f"- Section pages scanned: `{summary.get('section_pages_scanned', 0)}`")
+          lines.append(f"- Year pages scanned: `{summary.get('year_pages_scanned', 0)}`")
+          lines.append(f"- Albums added: `{summary.get('albums_added', 0)}`")
+          lines.append(f"- Albums updated: `{summary.get('albums_updated', 0)}`")
+          lines.append(f"- Tracks added: `{summary.get('tracks_added', 0)}`")
+          lines.append(f"- Tracks updated: `{summary.get('tracks_updated', 0)}`")
+          lines.append(f"- Challenged pages: `{summary.get('challenged_pages', 0)}`")
+          lines.append(f"- Challenged albums: `{summary.get('challenged_albums', 0)}`")
+          lines.append(f"- Failed albums: `{summary.get('albums_failed', 0)}`")
+          lines.append("")
+
+          warnings = report.get("warnings", [])
+          errors = report.get("errors", [])
+          if warnings:
+              lines.append("## Warnings")
+              for warning in warnings[:10]:
+                  lines.append(f"- {warning}")
+              lines.append("")
+          if errors:
+              lines.append("## Errors")
+              for error in errors[:10]:
+                  lines.append(f"- {error}")
+              lines.append("")
+
+          if validation:
+              checks = validation.get("checks", {})
+              lines.append("## Validation")
+              lines.append(f"- Snapshot validation: `{checks.get('ok', False)}`")
+              lines.append(f"- Songs: `{validation.get('stats', {}).get('songs', 0)}`")
+              lines.append(f"- Albums: `{validation.get('stats', {}).get('albums', 0)}`")
+              lines.append("")
+
+          summary_path.write_text("\n".join(lines) + "\n")
+          print("\n".join(lines))
+          PY

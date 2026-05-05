@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Any
 
 from .db import get_connection, transaction
@@ -8,6 +9,14 @@ from .utils import canonicalize_url, deterministic_id, now_utc, slugify
 
 
 DEFAULT_USER_ID = "local-user"
+
+
+@dataclass(frozen=True)
+class AlbumUpsertResult:
+    album_is_new: bool
+    songs_seen: int
+    songs_added: int
+    songs_updated: int
 
 
 def make_album_id(album_url: str, album_name: str) -> str:
@@ -71,7 +80,7 @@ def list_album_urls() -> list[str]:
     return [str(row[0]) for row in rows]
 
 
-def upsert_album(album: ScrapedAlbum) -> tuple[bool, int]:
+def upsert_album_details(album: ScrapedAlbum) -> AlbumUpsertResult:
     conn = get_connection()
     album_url = canonicalize_url(album.album_url)
     existing = conn.execute(
@@ -79,14 +88,12 @@ def upsert_album(album: ScrapedAlbum) -> tuple[bool, int]:
         [album_url, album.album_id],
     ).fetchone()
     now = now_utc()
+    stored_album_url = existing[0] if existing else album_url
     album_id = existing[1] if existing else album.album_id
     first_seen = existing[2] if existing else now
     is_new = existing is None
-
-    if not is_new:
-        with transaction() as tx:
-            tx.execute("DELETE FROM songs WHERE album_url = ?", [album_url])
-            tx.execute("DELETE FROM albums WHERE album_url = ?", [album_url])
+    songs_added = 0
+    songs_updated = 0
 
     with transaction() as tx:
         tx.execute(
@@ -95,9 +102,20 @@ def upsert_album(album: ScrapedAlbum) -> tuple[bool, int]:
               album_url, album_id, album_name, year, music_director, singers_summary,
               image_url, language, track_count, scrape_ok, first_seen_at, updated_at
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(album_url) DO UPDATE SET
+              album_id = excluded.album_id,
+              album_name = excluded.album_name,
+              year = COALESCE(excluded.year, albums.year),
+              music_director = COALESCE(excluded.music_director, albums.music_director),
+              singers_summary = COALESCE(excluded.singers_summary, albums.singers_summary),
+              image_url = COALESCE(excluded.image_url, albums.image_url),
+              language = COALESCE(excluded.language, albums.language),
+              track_count = excluded.track_count,
+              scrape_ok = excluded.scrape_ok,
+              updated_at = excluded.updated_at
             """,
             [
-                album_url,
+                stored_album_url,
                 album_id,
                 album.album_name,
                 album.year,
@@ -112,22 +130,37 @@ def upsert_album(album: ScrapedAlbum) -> tuple[bool, int]:
             ],
         )
 
-        retained_ids = []
         for song in album.songs:
-            song_id = make_song_id(album_url, song.track_number)
-            retained_ids.append(song_id)
+            song_id = make_song_id(stored_album_url, song.track_number)
             existing_song = conn.execute("SELECT first_seen_at FROM songs WHERE song_id = ?", [song_id]).fetchone()
             song_first_seen = existing_song[0] if existing_song else now
+            if existing_song:
+                songs_updated += 1
+            else:
+                songs_added += 1
             tx.execute(
                 """
                 INSERT INTO songs (
                   song_id, album_url, album_id, album_name, year, music_director, singers,
                   track_number, track_name, image_url, url_128kbps, url_320kbps, first_seen_at, updated_at
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(song_id) DO UPDATE SET
+                  album_url = excluded.album_url,
+                  album_id = excluded.album_id,
+                  album_name = excluded.album_name,
+                  year = COALESCE(excluded.year, songs.year),
+                  music_director = COALESCE(excluded.music_director, songs.music_director),
+                  singers = COALESCE(excluded.singers, songs.singers),
+                  track_number = excluded.track_number,
+                  track_name = excluded.track_name,
+                  image_url = COALESCE(excluded.image_url, songs.image_url),
+                  url_128kbps = COALESCE(excluded.url_128kbps, songs.url_128kbps),
+                  url_320kbps = COALESCE(excluded.url_320kbps, songs.url_320kbps),
+                  updated_at = excluded.updated_at
                 """,
                 [
                     song_id,
-                    album_url,
+                    stored_album_url,
                     album_id,
                     album.album_name,
                     album.year,
@@ -143,7 +176,17 @@ def upsert_album(album: ScrapedAlbum) -> tuple[bool, int]:
                 ],
             )
 
-    return is_new, len(album.songs)
+    return AlbumUpsertResult(
+        album_is_new=is_new,
+        songs_seen=len(album.songs),
+        songs_added=songs_added,
+        songs_updated=songs_updated,
+    )
+
+
+def upsert_album(album: ScrapedAlbum) -> tuple[bool, int]:
+    result = upsert_album_details(album)
+    return result.album_is_new, result.songs_seen
 
 
 def _favorite_song_ids(user_id: str = DEFAULT_USER_ID) -> set[str]:
