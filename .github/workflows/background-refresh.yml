@@ -83,6 +83,7 @@ jobs:
           source /tmp/retry.sh
           retry 3 20 python -m pip install --upgrade pip
           retry 3 30 python -m pip install -r apps/api/requirements.txt
+          retry 2 60 python -m playwright install --with-deps chromium
           retry 3 30 npm install
 
       - name: Ensure data directories exist
@@ -126,6 +127,8 @@ jobs:
           INPUT_FULL_SCAN: ${{ github.event.inputs.full_scan || 'true' }}
           INPUT_DELAY: ${{ github.event.inputs.delay || '1.3' }}
           DATABASE_PATH: ${{ env.WORKING_SQLITE_DB }}
+          MASSTAMILAN_USE_PLAYWRIGHT: "true"
+          MASSTAMILAN_PLAYWRIGHT_TIMEOUT_MS: "45000"
         working-directory: apps/api
         run: |
           source /tmp/retry.sh

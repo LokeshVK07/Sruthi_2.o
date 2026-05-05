@@ -8,3 +8,4 @@ lxml
 tenacity
 curl_cffi
 pydantic
+playwright

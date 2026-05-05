@@ -16,6 +16,8 @@ from .config import (
     MOVIE_INDEX_MAX_YEAR,
     MOVIE_INDEX_MIN_YEAR,
     SCRAPER_DELAY_SECONDS,
+    SCRAPER_PLAYWRIGHT_ENABLED,
+    SCRAPER_PLAYWRIGHT_TIMEOUT_MS,
     SITE_BASE_URL,
     SITE_LIST_PATH,
     SITE_MAX_PAGES,
@@ -76,6 +78,70 @@ class SiteScraper:
         self.curl = curl_requests.Session(impersonate="chrome124")
         self.curl.headers.update(HEADERS)
         self.refresh_locks: dict[str, threading.Lock] = {}
+        self.playwright_lock = threading.Lock()
+        self.playwright_runtime = None
+        self.playwright_browser = None
+        self.playwright_context = None
+        self.playwright_page = None
+
+    def _playwright_fetch(self, url: str, referer: str | None = None) -> str:
+        if not SCRAPER_PLAYWRIGHT_ENABLED:
+            raise ChallengeError(f"Challenge page detected for {url}")
+
+        with self.playwright_lock:
+            try:
+                from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
+                from playwright.sync_api import sync_playwright
+            except Exception as exc:  # pragma: no cover - optional dependency path
+                raise ChallengeError(f"Playwright is not available for {url}: {exc}") from exc
+
+            if self.playwright_runtime is None:
+                self.playwright_runtime = sync_playwright().start()
+                self.playwright_browser = self.playwright_runtime.chromium.launch(
+                    headless=True,
+                    args=["--disable-blink-features=AutomationControlled"],
+                )
+                self.playwright_context = self.playwright_browser.new_context(
+                    user_agent=HEADERS["user-agent"],
+                    locale="en-US",
+                )
+                self.playwright_page = self.playwright_context.new_page()
+
+            assert self.playwright_context is not None
+            assert self.playwright_page is not None
+
+            headers = {}
+            if referer:
+                headers["referer"] = referer
+            self.playwright_context.set_extra_http_headers(headers)
+
+            try:
+                self.playwright_page.goto(url, wait_until="domcontentloaded", timeout=SCRAPER_PLAYWRIGHT_TIMEOUT_MS)
+                try:
+                    self.playwright_page.wait_for_load_state("networkidle", timeout=5000)
+                except PlaywrightTimeoutError:
+                    pass
+                try:
+                    self.playwright_page.wait_for_function(
+                        """
+                        () => {
+                          const body = document.body ? document.body.innerText.toLowerCase() : "";
+                          return !body.includes("just a moment") &&
+                                 !body.includes("verify you are human") &&
+                                 !body.includes("attention required");
+                        }
+                        """,
+                        timeout=SCRAPER_PLAYWRIGHT_TIMEOUT_MS,
+                    )
+                except PlaywrightTimeoutError:
+                    pass
+                html = self.playwright_page.content()
+            except Exception as exc:
+                raise ChallengeError(f"Playwright fetch failed for {url}: {exc}") from exc
+
+        if is_challenge_page(html):
+            raise ChallengeError(f"Challenge page detected for {url}")
+        return html
 
     @retry(
         stop=stop_after_attempt(3),
@@ -93,7 +159,7 @@ class SiteScraper:
             curl_response = self.curl.get(url, timeout=30, headers=headers)
             html = curl_response.text
             if curl_response.status_code >= 400 or is_challenge_page(html):
-                raise ChallengeError(f"Challenge page detected for {url}")
+                html = self._playwright_fetch(url, referer=referer)
         if SCRAPER_DELAY_SECONDS > 0:
             time.sleep(SCRAPER_DELAY_SECONDS)
         return html

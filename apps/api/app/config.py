@@ -39,6 +39,8 @@ SITE_MAX_PAGES = int(os.getenv("MASSTAMILAN_MAX_PAGES", "481"))
 SCRAPER_DELAY_SECONDS = float(os.getenv("MASSTAMILAN_DELAY_SECONDS", "0.2"))
 MOVIE_INDEX_MIN_YEAR = int(os.getenv("MASSTAMILAN_MIN_YEAR", "1930"))
 MOVIE_INDEX_MAX_YEAR = int(os.getenv("MASSTAMILAN_MAX_YEAR", str(datetime.utcnow().year)))
+SCRAPER_PLAYWRIGHT_ENABLED = os.getenv("MASSTAMILAN_USE_PLAYWRIGHT", "false").strip().lower() in {"1", "true", "yes", "on"}
+SCRAPER_PLAYWRIGHT_TIMEOUT_MS = int(os.getenv("MASSTAMILAN_PLAYWRIGHT_TIMEOUT_MS", "45000"))
 
 for directory in [
     DATABASE_PATH.parent,
