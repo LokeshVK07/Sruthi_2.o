@@ -4,7 +4,7 @@ from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 from .cache import cache_status, trim_cache
@@ -16,18 +16,19 @@ from .playback import (
     queue_album_prefetch,
     queue_prefetch,
     stream_song,
-    unavailable_silence_bytes,
     warmup_song,
 )
 from .refresh import get_refresh_status, start_refresh_worker, trigger_refresh
 from .repository import (
     album_song_ids,
+    composer_songs,
     count_albums,
     count_songs,
     get_album_by_id,
     get_frontend_song,
     get_song,
     list_albums,
+    list_composers,
     list_favorites,
     list_frontend_library,
     list_library,
@@ -103,8 +104,9 @@ def library_home():
 
 
 @app.get("/api/library/songs")
-def library_songs():
-    return {"items": [song.model_dump() for song in list_frontend_library(count_songs())]}
+def library_songs(limit: int = 800):
+    bounded = max(1, min(limit, 5000))
+    return {"items": [song.model_dump() for song in list_frontend_library(bounded)]}
 
 
 @app.get("/api/albums")
@@ -149,6 +151,25 @@ def favorites_toggle(song_id: str):
 @app.get("/api/playlists")
 def playlists():
     return {"items": [playlist.model_dump() for playlist in list_playlists()]}
+
+
+@app.get("/api/composers")
+def composers(limit: int = 40, min_songs: int = 8):
+    items = list_composers(limit=max(1, min(limit, 200)), min_songs=max(1, min_songs))
+    return {"items": [item.model_dump() for item in items]}
+
+
+@app.get("/api/composers/{slug}/songs")
+def composer_detail(slug: str, limit: int = 200):
+    name, items = composer_songs(slug, limit=max(1, min(limit, 500)))
+    if not name:
+        raise HTTPException(404, "Composer not found")
+    return {
+        "slug": slug,
+        "name": name,
+        "songCount": len(items),
+        "items": [song.model_dump() for song in items],
+    }
 
 
 @app.post("/api/recently-played/{song_id}")
@@ -258,24 +279,30 @@ def stream(song_id: str, request: Request):
     try:
         result = stream_song(song_id, dict(request.headers))
     except FileNotFoundError as exc:
-        print(f"[stream] soft-fail missing {song_id}: {exc}")
-        return Response(
-            unavailable_silence_bytes(),
-            status_code=200,
-            media_type="audio/wav",
-            headers={"x-melodify-fallback": "missing"},
+        print(f"[stream] not-found {song_id}: {exc}")
+        return JSONResponse(
+            {"ok": False, "songId": song_id, "reason": "missing", "detail": str(exc)},
+            status_code=404,
+            headers={"x-melodify-error": "missing"},
         )
     except Exception as exc:
-        print(f"[stream] soft-fail upstream {song_id}: {exc}")
-        return Response(
-            unavailable_silence_bytes(),
-            status_code=200,
-            media_type="audio/wav",
-            headers={"x-melodify-fallback": "unavailable"},
+        print(f"[stream] upstream-fail {song_id}: {exc}")
+        return JSONResponse(
+            {"ok": False, "songId": song_id, "reason": "unavailable", "detail": str(exc)},
+            status_code=502,
+            headers={"x-melodify-error": "unavailable"},
         )
 
     if result["type"] == "cache":
         return FileResponse(result["path"], media_type=result["content_type"], headers=result.get("headers"))
+
+    if result["type"] == "cache-stream":
+        return StreamingResponse(
+            result["iterator"],
+            status_code=result["status_code"],
+            media_type=result["content_type"],
+            headers=result.get("headers"),
+        )
 
     return StreamingResponse(result["iterator"], status_code=result["status_code"], media_type=result["content_type"], headers=result.get("headers"))
 

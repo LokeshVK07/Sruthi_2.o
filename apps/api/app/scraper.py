@@ -34,14 +34,16 @@ HEADERS = {
     "pragma": "no-cache",
 }
 
+# Cloudflare's anti-bot script is embedded on EVERY page served from a
+# CF-fronted origin (including normal album/listing pages), so its mere
+# presence does NOT indicate a challenge. A real interstitial has a tiny body
+# AND interstitial-specific copy below.
 CHALLENGE_MARKERS = (
     "just a moment",
     "enable javascript and cookies to continue",
     "attention required",
-    "verify you are human",
     "cf-browser-verification",
-    "/cdn-cgi/challenge-platform",
-    "access denied",
+    "checking your browser",
 )
 
 
@@ -50,14 +52,28 @@ def normalize(value: str) -> str:
 
 
 def is_challenge_page(html: str, status_code: int | None = None, headers: dict[str, Any] | None = None) -> bool:
+    """Detect a Cloudflare challenge interstitial.
+
+    A real interstitial:
+      - returns 403/429/503, or 200 with a very small body
+      - contains a short, specific phrase ("just a moment", etc.)
+      - lacks the normal site title
+
+    A normal page that happens to include /cdn-cgi/challenge-platform/ is NOT
+    a challenge. Treating it as one is what blocked the entire refresh path.
+    """
     lower = (html or "").lower()
+    body_len = len(lower.strip())
     header_map = {str(key).lower(): str(value).lower() for key, value in (headers or {}).items()}
     content_type = header_map.get("content-type", "")
+
+    has_interstitial_marker = any(marker in lower for marker in CHALLENGE_MARKERS)
+
     if status_code in {403, 429} and ("text/html" in content_type or not content_type):
         return True
-    if any(marker in lower for marker in CHALLENGE_MARKERS):
+    if status_code == 503 and body_len < 4096:
         return True
-    if status_code in {403, 429, 503} and len(lower.strip()) < 1024:
+    if has_interstitial_marker and body_len < 8192:
         return True
     return False
 
@@ -91,9 +107,14 @@ class SiteScraper:
             headers["referer"] = referer
         scraper, curl = self._clients()
         errors: list[str] = []
+        challenge_count = 0
+        # curl_cffi (chrome impersonation) is more likely to clear Cloudflare's
+        # JS challenge than cloudscraper, so try it first. Continue to the next
+        # client on a challenge or 5xx response — only raise ChallengeError if
+        # ALL clients return a challenge.
         for client_name, getter in (
-            ("cloudscraper", lambda: scraper.get(url, timeout=30, headers=headers)),
             ("curl_cffi", lambda: curl.get(url, timeout=30, headers=headers)),
+            ("cloudscraper", lambda: scraper.get(url, timeout=30, headers=headers)),
         ):
             try:
                 response = getter()
@@ -102,7 +123,9 @@ class SiteScraper:
                 continue
             html = response.text
             if is_challenge_page(html, response.status_code, dict(response.headers)):
-                raise ChallengeError(f"Challenge page detected for {url}")
+                challenge_count += 1
+                errors.append(f"{client_name}: challenge page (status={response.status_code})")
+                continue
             if response.status_code >= 500:
                 errors.append(f"{client_name}: upstream {response.status_code}")
                 continue
@@ -112,14 +135,16 @@ class SiteScraper:
                 errors.append(f"{client_name}: empty response body")
                 continue
             return html
+        if challenge_count and challenge_count == len([1 for _ in errors]):
+            raise ChallengeError(f"Challenge page detected for {url} ({'; '.join(errors)})")
         raise FetchError("; ".join(errors) if errors else f"Failed to fetch {url}")
 
-    def fetch_html(self, url: str, referer: str | None = None, *, max_attempts: int = 3) -> str:
+    def fetch_html(self, url: str, referer: str | None = None, *, max_attempts: int = 3, polite_delay: bool = True) -> str:
         last_error: Exception | None = None
         for attempt in range(1, max_attempts + 1):
             try:
                 html = self._request_once(url, referer=referer)
-                if SCRAPER_DELAY_SECONDS > 0:
+                if polite_delay and SCRAPER_DELAY_SECONDS > 0:
                     time.sleep(SCRAPER_DELAY_SECONDS)
                 return html
             except ChallengeError as exc:
@@ -426,8 +451,8 @@ class SiteScraper:
                 return candidate
         return ""
 
-    def parse_album(self, album_url: str) -> ScrapedAlbum:
-        html = self.fetch_html(album_url, referer=f"{SITE_BASE_URL}{SITE_LIST_PATH}")
+    def parse_album(self, album_url: str, *, polite_delay: bool = True) -> ScrapedAlbum:
+        html = self.fetch_html(album_url, referer=f"{SITE_BASE_URL}{SITE_LIST_PATH}", polite_delay=polite_delay)
         soup = BeautifulSoup(html, "lxml")
         album_url = canonicalize_url(album_url)
         album_name = self._album_title(soup)
@@ -567,10 +592,10 @@ class SiteScraper:
                 phase_report[key] = phase_report.get(key, 0) + value
         return counts
 
-    def refresh_album(self, album_url: str) -> ScrapedAlbum:
+    def refresh_album(self, album_url: str, *, polite_delay: bool = True) -> ScrapedAlbum:
         lock = self.refresh_locks.setdefault(album_url, threading.Lock())
         with lock:
-            return self.parse_album(album_url)
+            return self.parse_album(album_url, polite_delay=polite_delay)
 
     def scrape_album_url(self, album_url: str) -> ScrapedAlbum:
         return self.parse_album(album_url)

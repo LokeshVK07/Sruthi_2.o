@@ -118,3 +118,12 @@ class PlaylistSummary(BaseModel):
     name: str
     description: str | None = None
     songCount: int = 0
+
+
+class ComposerSummary(BaseModel):
+    slug: str
+    name: str
+    songCount: int
+    albumCount: int
+    coverUrl: str | None = None
+    sampleSongIds: list[str] = []

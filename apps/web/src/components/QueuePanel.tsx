@@ -74,7 +74,7 @@ export default function QueuePanel({ queue, fallbackArt, currentSongId, onPlay, 
               }}
             >
               <button className="queue-item__main" onClick={() => onPlay(song)}>
-                <img src={song.artworkUrl || fallbackArt} alt={song.title} />
+                <img src={song.artworkUrl || fallbackArt} alt={song.title} loading="lazy" decoding="async" />
                 <div className="queue-item__copy">
                   <strong title={song.title}>{song.title}</strong>
                   <span title={song.artist}>{song.artist}</span>

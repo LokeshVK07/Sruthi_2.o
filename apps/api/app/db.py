@@ -114,7 +114,33 @@ SCHEMA_SQL = """
         CREATE INDEX IF NOT EXISTS idx_songs_album_id ON songs(album_id);
         CREATE INDEX IF NOT EXISTS idx_songs_track_name ON songs(track_name);
         CREATE INDEX IF NOT EXISTS idx_songs_updated_at ON songs(updated_at);
+        CREATE INDEX IF NOT EXISTS idx_songs_music_director ON songs(music_director);
+        CREATE INDEX IF NOT EXISTS idx_albums_music_director ON albums(music_director);
         CREATE INDEX IF NOT EXISTS idx_recently_played_played_at ON recently_played(played_at);
+
+        CREATE VIRTUAL TABLE IF NOT EXISTS songs_fts USING fts5(
+          song_id UNINDEXED,
+          track_name,
+          album_name,
+          singers,
+          music_director,
+          tokenize = "unicode61 remove_diacritics 2"
+        );
+
+        CREATE TRIGGER IF NOT EXISTS songs_ai AFTER INSERT ON songs BEGIN
+          INSERT INTO songs_fts (song_id, track_name, album_name, singers, music_director)
+          VALUES (new.song_id, new.track_name, new.album_name, COALESCE(new.singers,''), COALESCE(new.music_director,''));
+        END;
+
+        CREATE TRIGGER IF NOT EXISTS songs_ad AFTER DELETE ON songs BEGIN
+          DELETE FROM songs_fts WHERE song_id = old.song_id;
+        END;
+
+        CREATE TRIGGER IF NOT EXISTS songs_au AFTER UPDATE ON songs BEGIN
+          DELETE FROM songs_fts WHERE song_id = old.song_id;
+          INSERT INTO songs_fts (song_id, track_name, album_name, singers, music_director)
+          VALUES (new.song_id, new.track_name, new.album_name, COALESCE(new.singers,''), COALESCE(new.music_director,''));
+        END;
 """
 
 
@@ -290,10 +316,36 @@ def transaction():
         raise
 
 
+def _ensure_fts_populated(conn: sqlite3.Connection) -> None:
+    """Backfill songs_fts after the trigger is first installed.
+
+    On first run after this migration the FTS5 table exists but has no rows
+    because the triggers only fire on subsequent INSERT/UPDATE/DELETE. Detect
+    that and bulk-load every song row once.
+    """
+    fts_count_row = conn.execute("SELECT COUNT(*) FROM songs_fts").fetchone()
+    fts_count = int(fts_count_row[0]) if fts_count_row else 0
+    songs_count_row = conn.execute("SELECT COUNT(*) FROM songs").fetchone()
+    songs_count = int(songs_count_row[0]) if songs_count_row else 0
+    if fts_count >= songs_count:
+        return
+    print(f"[db] backfilling songs_fts: {songs_count} rows...")
+    conn.execute("DELETE FROM songs_fts")
+    conn.execute(
+        """
+        INSERT INTO songs_fts (song_id, track_name, album_name, singers, music_director)
+        SELECT song_id, track_name, album_name, COALESCE(singers,''), COALESCE(music_director,'')
+        FROM songs
+        """
+    )
+    print(f"[db] songs_fts backfill complete")
+
+
 def init_db() -> None:
     ensure_database_ready()
     conn = get_connection()
     conn.executescript(SCHEMA_SQL)
+    _ensure_fts_populated(conn)
 
 
 def init_db_path(path: Path) -> None:

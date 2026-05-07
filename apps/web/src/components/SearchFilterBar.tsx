@@ -1,4 +1,4 @@
-import { Filter, Grid2x2, List, Search } from "lucide-react";
+import { Filter, Grid2x2, List, RefreshCw, Search } from "lucide-react";
 import type { RefreshStatus } from "../types";
 
 type FilterKey = "all" | "tracks" | "albums" | "artists" | "playlists";
@@ -33,38 +33,52 @@ export default function SearchFilterBar({
   onSetViewMode,
   onRefreshCheck
 }: SearchFilterBarProps) {
-  const refreshLabel =
-    refreshState?.status === "downloading"
-      ? "Downloading"
-      : refreshState?.status === "applying"
-        ? "Applying"
-        : refreshState?.status === "updated"
-          ? "Updated"
-          : refreshState?.status === "error"
-            ? "Refresh error"
-            : refreshState?.status === "checking"
-              ? "Checking"
-              : "Catalog sync";
+  const status = refreshState?.status ?? "idle";
+  const refreshActive =
+    refreshPending || status === "checking" || status === "downloading" || status === "applying";
+  const refreshTitle =
+    status === "downloading"
+      ? "Downloading new catalog snapshot"
+      : status === "applying"
+        ? "Applying new catalog snapshot"
+        : status === "updated"
+          ? "Catalog up to date"
+          : status === "error"
+            ? refreshState?.message || "Last refresh failed — click to retry"
+            : status === "checking"
+              ? "Checking for library updates"
+              : refreshState?.message || "Check for library updates";
+  const refreshClasses = [
+    "search-filter-bar__icon",
+    "search-filter-bar__refresh",
+    refreshActive ? "is-spinning" : "",
+    status === "error" ? "is-error" : "",
+    status === "updated" ? "is-success" : ""
+  ]
+    .filter(Boolean)
+    .join(" ");
 
   return (
     <section className="search-filter-bar">
       <label className="search-filter-bar__input">
-        <Search size={18} />
+        <Search size={16} />
         <input value={query} onChange={(event) => onQueryChange(event.target.value)} placeholder="Search tracks, albums, artists..." />
       </label>
 
       <div className="search-filter-bar__actions">
         <button
-          className={refreshState?.status === "error" ? "search-filter-bar__pill is-active" : "search-filter-bar__pill"}
+          type="button"
+          className={refreshClasses}
           onClick={onRefreshCheck}
-          disabled={refreshPending || refreshState?.status === "checking" || refreshState?.status === "downloading" || refreshState?.status === "applying"}
-          title={refreshState?.message || "Check for library updates"}
+          disabled={refreshActive}
+          title={refreshTitle}
+          aria-label={refreshTitle}
         >
-          {refreshPending ? "Checking…" : refreshLabel}
+          <RefreshCw size={15} />
         </button>
         <div className="search-filter-bar__filter-wrap">
           <button className={filterOpen ? "search-filter-bar__pill is-active" : "search-filter-bar__pill"} onClick={onToggleFilter}>
-            <Filter size={16} />
+            <Filter size={14} />
             Filters
           </button>
           {filterOpen ? (
@@ -87,14 +101,14 @@ export default function SearchFilterBar({
           onClick={() => onSetViewMode("grid")}
           aria-label="Grid view"
         >
-          <Grid2x2 size={17} />
+          <Grid2x2 size={15} />
         </button>
         <button
           className={viewMode === "list" ? "search-filter-bar__icon is-active" : "search-filter-bar__icon"}
           onClick={() => onSetViewMode("list")}
           aria-label="List view"
         >
-          <List size={17} />
+          <List size={15} />
         </button>
       </div>
     </section>

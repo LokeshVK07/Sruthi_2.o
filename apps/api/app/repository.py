@@ -6,7 +6,7 @@ from typing import Any
 
 from .config import DATABASE_PATH
 from .db import ensure_database_ready, get_connection, transaction
-from .schemas import AlbumRecord, FrontendSong, PlaylistSummary, PublicSong, ScrapedAlbum, SongRecord, SongStatus
+from .schemas import AlbumRecord, ComposerSummary, FrontendSong, PlaylistSummary, PublicSong, ScrapedAlbum, SongRecord, SongStatus
 from .utils import canonicalize_url, deterministic_id, now_utc, slugify
 
 
@@ -386,6 +386,17 @@ def album_song_ids(album_id: str, limit: int | None = None) -> list[str]:
     return [row[0] for row in rows]
 
 
+def album_song_ids_by_url(album_url: str, limit: int | None = None) -> list[str]:
+    canonical = canonicalize_url(album_url)
+    query = "SELECT song_id FROM songs WHERE album_url = ? ORDER BY track_number ASC"
+    params: list[Any] = [canonical]
+    if limit is not None:
+        query += " LIMIT ?"
+        params.append(limit)
+    rows = get_connection().execute(query, params).fetchall()
+    return [row[0] for row in rows]
+
+
 def get_song(song_id: str) -> SongRecord | None:
     ensure_database_ready()
     conn = get_connection()
@@ -450,32 +461,81 @@ def search_songs(query: str, limit: int = 100) -> list[PublicSong]:
     ]
 
 
+def _fts_query(query: str) -> str:
+    """Build an FTS5 MATCH expression that ranks prefix matches per token.
+
+    'oorum blood' → 'oorum* OR blood* OR (oorum* AND blood*)' style
+    Sanitises punctuation that FTS5 treats as syntax.
+    """
+    cleaned = "".join(ch if ch.isalnum() or ch.isspace() else " " for ch in query)
+    tokens = [tok for tok in cleaned.split() if tok]
+    if not tokens:
+        return ""
+    quoted = [f'"{tok}"*' for tok in tokens]
+    if len(tokens) == 1:
+        return quoted[0]
+    return " AND ".join(quoted)
+
+
 def search_frontend_songs(query: str, limit: int = 100, user_id: str = DEFAULT_USER_ID) -> list[FrontendSong]:
-    normalized = query.strip().lower()
-    q = f"%{normalized}%"
-    prefix = f"{normalized}%"
-    rows = get_connection().execute(
-        """
-        SELECT song_id, album_id, album_name, year, music_director, singers, track_number, track_name, image_url, updated_at
-        FROM songs
-        WHERE lower(track_name) LIKE ? OR lower(album_name) LIKE ? OR lower(coalesce(singers,'')) LIKE ? OR lower(coalesce(music_director,'')) LIKE ?
-        ORDER BY
-          CASE
-            WHEN lower(track_name) = ? THEN 0
-            WHEN lower(track_name) LIKE ? THEN 1
-            WHEN lower(album_name) = ? THEN 2
-            WHEN lower(album_name) LIKE ? THEN 3
-            WHEN lower(coalesce(singers,'')) LIKE ? THEN 4
-            WHEN lower(coalesce(music_director,'')) LIKE ? THEN 5
-            ELSE 6
-          END,
-          updated_at DESC,
-          album_name ASC,
-          track_number ASC
-        LIMIT ?
-        """,
-        [q, q, q, q, normalized, prefix, normalized, prefix, prefix, prefix, limit],
-    ).fetchall()
+    ensure_database_ready()
+    normalized = query.strip()
+    if not normalized:
+        return []
+    conn = get_connection()
+    fts_expression = _fts_query(normalized.lower())
+    rows: list[Any] = []
+    if fts_expression:
+        try:
+            rows = conn.execute(
+                """
+                SELECT s.song_id, s.album_id, s.album_name, s.year, s.music_director, s.singers,
+                       s.track_number, s.track_name, s.image_url, s.updated_at
+                FROM songs_fts f
+                JOIN songs s ON s.song_id = f.song_id
+                WHERE f.songs_fts MATCH ?
+                ORDER BY
+                  CASE WHEN lower(s.track_name) = lower(?) THEN 0 ELSE 1 END,
+                  bm25(f.songs_fts, 0.0, 4.0, 2.0, 1.5, 1.0),
+                  s.updated_at DESC,
+                  s.album_name ASC,
+                  s.track_number ASC
+                LIMIT ?
+                """,
+                [fts_expression, normalized, limit],
+            ).fetchall()
+        except sqlite3.OperationalError as exc:
+            print(f"[search] FTS5 query failed for {normalized!r}: {exc}; falling back to LIKE")
+            rows = []
+
+    if not rows:
+        like_pattern = f"%{normalized.lower()}%"
+        prefix = f"{normalized.lower()}%"
+        rows = conn.execute(
+            """
+            SELECT song_id, album_id, album_name, year, music_director, singers, track_number, track_name, image_url, updated_at
+            FROM songs
+            WHERE lower(track_name) LIKE ? OR lower(album_name) LIKE ?
+                  OR lower(coalesce(singers,'')) LIKE ? OR lower(coalesce(music_director,'')) LIKE ?
+            ORDER BY
+              CASE
+                WHEN lower(track_name) = ? THEN 0
+                WHEN lower(track_name) LIKE ? THEN 1
+                WHEN lower(album_name) = ? THEN 2
+                WHEN lower(album_name) LIKE ? THEN 3
+                WHEN lower(coalesce(singers,'')) LIKE ? THEN 4
+                WHEN lower(coalesce(music_director,'')) LIKE ? THEN 5
+                ELSE 6
+              END,
+              updated_at DESC,
+              album_name ASC,
+              track_number ASC
+            LIMIT ?
+            """,
+            [like_pattern, like_pattern, like_pattern, like_pattern,
+             normalized.lower(), prefix, normalized.lower(), prefix, prefix, prefix, limit],
+        ).fetchall()
+
     favorite_ids = _favorite_song_ids(user_id)
     return [_map_public_song(row, favorite_ids) for row in rows]
 
@@ -587,6 +647,96 @@ def list_playlists(limit: int = 50, user_id: str = DEFAULT_USER_ID) -> list[Play
     ]
     base.insert(0, PlaylistSummary(id="favorites", name="Favorites", description="Tracks you liked", songCount=len(list_favorites(500, user_id))))
     return base
+
+
+_composer_lookup_cache: dict[str, str] = {}
+
+
+def _composer_slug(name: str) -> str:
+    return slugify(name) or "unknown"
+
+
+def list_composers(limit: int = 60, min_songs: int = 8) -> list[ComposerSummary]:
+    rows = get_connection().execute(
+        """
+        SELECT
+          music_director AS name,
+          COUNT(*) AS song_count,
+          COUNT(DISTINCT album_id) AS album_count
+        FROM songs
+        WHERE music_director IS NOT NULL AND music_director != ''
+        GROUP BY music_director
+        HAVING song_count >= ?
+        ORDER BY song_count DESC
+        LIMIT ?
+        """,
+        [min_songs, limit],
+    ).fetchall()
+    summaries: list[ComposerSummary] = []
+    conn = get_connection()
+    for row in rows:
+        name = str(row[0])
+        slug = _composer_slug(name)
+        _composer_lookup_cache[slug] = name
+        sample = conn.execute(
+            """
+            SELECT song_id, image_url
+            FROM songs
+            WHERE music_director = ? AND image_url IS NOT NULL AND image_url != ''
+            ORDER BY updated_at DESC
+            LIMIT 4
+            """,
+            [name],
+        ).fetchall()
+        sample_ids = [str(r[0]) for r in sample]
+        cover = next((str(r[1]) for r in sample if r[1]), None)
+        summaries.append(
+            ComposerSummary(
+                slug=slug,
+                name=name,
+                songCount=int(row[1]),
+                albumCount=int(row[2]),
+                coverUrl=cover,
+                sampleSongIds=sample_ids,
+            )
+        )
+    return summaries
+
+
+def _resolve_composer_name(slug: str) -> str | None:
+    if slug in _composer_lookup_cache:
+        return _composer_lookup_cache[slug]
+    rows = get_connection().execute(
+        """
+        SELECT DISTINCT music_director
+        FROM songs
+        WHERE music_director IS NOT NULL AND music_director != ''
+        """
+    ).fetchall()
+    for row in rows:
+        name = str(row[0])
+        if _composer_slug(name) == slug:
+            _composer_lookup_cache[slug] = name
+            return name
+    return None
+
+
+def composer_songs(slug: str, limit: int = 200, user_id: str = DEFAULT_USER_ID) -> tuple[str | None, list[FrontendSong]]:
+    name = _resolve_composer_name(slug)
+    if not name:
+        return None, []
+    rows = get_connection().execute(
+        """
+        SELECT song_id, album_id, album_name, year, music_director, singers, track_number, track_name, image_url, updated_at
+        FROM songs
+        WHERE music_director = ?
+        ORDER BY updated_at DESC, album_name ASC, track_number ASC
+        LIMIT ?
+        """,
+        [name, limit],
+    ).fetchall()
+    favorite_ids = _favorite_song_ids(user_id)
+    return name, [_map_public_song(row, favorite_ids) for row in rows]
 
 
 def next_songs_for_prefetch(song_id: str, limit: int) -> list[str]:

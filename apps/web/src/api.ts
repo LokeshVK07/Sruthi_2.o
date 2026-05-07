@@ -1,4 +1,4 @@
-import type { Album, AlbumDetail, HomeResponse, Playlist, RefreshStatus, Song } from "./types";
+import type { Album, AlbumDetail, ComposerCollection, ComposerDetail, HomeResponse, Playlist, RefreshStatus, Song } from "./types";
 
 type ApiSong =
   | Song
@@ -158,4 +158,37 @@ export const apiClient = {
       method: "POST",
       body: JSON.stringify({ albumId, leadLimit, refreshLinks })
     }),
+  composers: async (): Promise<{ items: ComposerCollection[] }> => {
+    const data = await api<{
+      items: Array<{
+        slug: string;
+        name: string;
+        songCount: number;
+        albumCount: number;
+        coverUrl?: string | null;
+        sampleSongIds?: string[];
+      }>;
+    }>("/api/composers");
+    return {
+      items: data.items.map((item) => ({
+        slug: item.slug,
+        name: item.name,
+        songCount: item.songCount,
+        albumCount: item.albumCount,
+        coverUrl: item.coverUrl ?? null,
+        sampleSongIds: item.sampleSongIds ?? []
+      }))
+    };
+  },
+  composerSongs: async (slug: string): Promise<ComposerDetail> => {
+    const data = await api<{ slug: string; name: string; songCount: number; items: ApiSong[] }>(
+      `/api/composers/${encodeURIComponent(slug)}/songs`
+    );
+    return {
+      slug: data.slug,
+      name: data.name,
+      songCount: data.songCount,
+      songs: data.items.map(normalizeSong)
+    };
+  }
 };

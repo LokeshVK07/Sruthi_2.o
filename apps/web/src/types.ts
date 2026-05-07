@@ -64,3 +64,19 @@ export type RefreshStatus = {
   totalBytes?: number;
   error?: string;
 };
+
+export type ComposerCollection = {
+  slug: string;
+  name: string;
+  songCount: number;
+  albumCount: number;
+  coverUrl?: string | null;
+  sampleSongIds?: string[];
+};
+
+export type ComposerDetail = {
+  slug: string;
+  name: string;
+  songCount: number;
+  songs: Song[];
+};

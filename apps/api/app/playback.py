@@ -22,6 +22,7 @@ from .cache import (
     validate_cache_file,
 )
 from .config import MIN_CACHE_FILE_BYTES
+from .playwright_fetch import playwright_downloader
 from .repository import album_song_ids, get_song, song_status
 from .scraper import site_scraper
 
@@ -44,7 +45,41 @@ ACCEPTED_TYPES = {"audio/mpeg", "audio/mp3", "audio/aac", "audio/ogg", "audio/wa
 CHUNK_SIZE = 131072
 METADATA_CACHE_TTL_SECONDS = 300.0
 RESOLVED_URL_TTL_SECONDS = 1800.0
-FAILED_URL_TTL_SECONDS = 90.0
+FAILED_URL_TTL_SECONDS = 20.0
+INTERACTIVE_CONNECT_TIMEOUT = 5.0
+INTERACTIVE_READ_TIMEOUT = 25.0
+# masstamilan rejects unknown UAs. Use a real Chrome UA string.
+CHROME_UA = (
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+)
+# Tracks song_ids whose stored URLs have been confirmed to actually serve audio.
+# Stored URLs are time-limited and IP-bound on the source side, so we only trust
+# them after a successful upstream open. Without this gate we'd cache failing
+# URLs in resolved_url_cache and keep retrying them.
+verified_url_cache: dict[str, float] = {}
+VERIFIED_URL_TTL_SECONDS = 1800.0
+# Tracks song_ids whose URLs were just refreshed (e.g. via album-prefetch).
+# Freshly scraped URLs come straight from the source and are extremely likely to
+# work on the first try, so streams for those songs should skip the JIT refresh
+# step that otherwise adds ~700ms before the first byte.
+freshly_scraped_cache: dict[str, float] = {}
+FRESHLY_SCRAPED_TTL_SECONDS = 1500.0
+# Tracks album_urls whose CDN download URLs are blocked by Cloudflare (curl/
+# cloudscraper both fail). Once an album hits Playwright successfully, every
+# subsequent song in that album skips the wasteful normal-resolution path
+# (~5 s of failing curl/cloudscraper attempts) and goes straight to the
+# Playwright fallback.
+cloudflare_blocked_albums: dict[str, float] = {}
+CLOUDFLARE_BLOCKED_TTL_SECONDS = 1800.0
+
+
+def _mark_album_cf_blocked(album_url: str) -> None:
+    cloudflare_blocked_albums[album_url] = time.time() + CLOUDFLARE_BLOCKED_TTL_SECONDS
+
+
+def _is_album_cf_blocked(album_url: str) -> bool:
+    return cloudflare_blocked_albums.get(album_url, 0.0) > time.time()
 prefetch_runtime_status = {
     "activePrefetches": 0,
     "activeAlbumPrefetches": 0,
@@ -53,8 +88,20 @@ prefetch_runtime_status = {
     "lastPrefetchError": None,
     "lastStreamFirstByteMs": None,
 }
-http_client = curl_requests.Session(impersonate="chrome124")
-cloud_client = cloudscraper.create_scraper(browser={"browser": "chrome", "platform": "darwin", "mobile": False})
+# Persistent sessions accumulate cookies that masstamilan rotates aggressively;
+# stale cookies cause the CDN to redirect us to the HTML "expired" page even
+# when the URL itself is fresh. Build short-lived per-request sessions instead.
+def _new_curl_session() -> curl_requests.Session:
+    return curl_requests.Session(impersonate="chrome124")
+
+
+def _new_cloud_session():
+    return cloudscraper.create_scraper(browser={"browser": "chrome", "platform": "darwin", "mobile": False})
+
+
+# Kept as fallbacks but no longer the primary clients.
+http_client = _new_curl_session()
+cloud_client = _new_cloud_session()
 
 
 def unavailable_silence_bytes(duration_seconds: float = 0.35, sample_rate: int = 8000) -> bytes:
@@ -84,9 +131,32 @@ def _upstream_candidates(song) -> list[str]:
     for url in (song.url_320kbps, song.url_128kbps):
         if url and url not in candidates:
             candidates.append(url)
-    if candidates:
-        resolved_url_cache[song.song_id] = (time.time() + RESOLVED_URL_TTL_SECONDS, list(candidates))
     return candidates
+
+
+def _mark_url_verified(song_id: str, chosen: str) -> None:
+    verified_url_cache[song_id] = time.time() + VERIFIED_URL_TTL_SECONDS
+    resolved_url_cache[song_id] = (time.time() + RESOLVED_URL_TTL_SECONDS, [chosen])
+
+
+def _is_url_verified(song_id: str) -> bool:
+    expiry = verified_url_cache.get(song_id, 0.0)
+    return expiry > time.time()
+
+
+def _mark_song_freshly_scraped(song_id: str) -> None:
+    freshly_scraped_cache[song_id] = time.time() + FRESHLY_SCRAPED_TTL_SECONDS
+
+
+def _is_song_freshly_scraped(song_id: str) -> bool:
+    return freshly_scraped_cache.get(song_id, 0.0) > time.time()
+
+
+def _invalidate_song_url_caches(song_id: str) -> None:
+    resolved_url_cache.pop(song_id, None)
+    verified_url_cache.pop(song_id, None)
+    failed_attempt_cache.pop(song_id, None)
+    freshly_scraped_cache.pop(song_id, None)
 
 
 def _is_download_active(song_id: str) -> bool:
@@ -155,9 +225,13 @@ def prefetch_status() -> dict[str, object]:
 
 def _build_upstream_headers(song, request_headers: dict[str, str], accept_encoding: str | None = "identity") -> dict[str, str]:
     headers = {
-        "user-agent": "Mozilla/5.0 Vibe2o/1.0",
-        "accept": "audio/*,*/*;q=0.8",
+        "user-agent": CHROME_UA,
+        "accept": "audio/webm,audio/ogg,audio/wav,audio/*;q=0.9,application/ogg;q=0.7,video/*;q=0.6,*/*;q=0.5",
+        "accept-language": "en-US,en;q=0.9",
         "referer": song.album_url,
+        "sec-fetch-dest": "audio",
+        "sec-fetch-mode": "no-cors",
+        "sec-fetch-site": "same-origin",
     }
     if accept_encoding:
         headers["accept-encoding"] = accept_encoding
@@ -169,40 +243,49 @@ def _build_upstream_headers(song, request_headers: dict[str, str], accept_encodi
 
 
 def _open_upstream_candidates(song, chosen: str, request_headers: dict[str, str]):
+    timeout = (INTERACTIVE_CONNECT_TIMEOUT, INTERACTIVE_READ_TIMEOUT)
+    # Use fresh per-request sessions so accumulated cookies on the long-lived
+    # session don't poison the CDN handshake.
+    fresh_curl = _new_curl_session()
+    fresh_cloud = _new_cloud_session()
     clients = [
         (
             "curl_identity",
-            lambda: http_client.get(
+            lambda: fresh_curl.get(
                 chosen,
                 headers=_build_upstream_headers(song, request_headers, "identity"),
                 stream=True,
-                timeout=(8, 30),
-            ),
-        ),
-        (
-            "cloudscraper",
-            lambda: cloud_client.get(
-                chosen,
-                headers=_build_upstream_headers(song, request_headers, None),
-                stream=True,
-                timeout=(8, 30),
+                timeout=timeout,
+                allow_redirects=True,
             ),
         ),
         (
             "curl_default",
-            lambda: http_client.get(
+            lambda: fresh_curl.get(
                 chosen,
                 headers=_build_upstream_headers(song, request_headers, None),
                 stream=True,
-                timeout=(8, 30),
+                timeout=timeout,
+                allow_redirects=True,
+            ),
+        ),
+        (
+            "cloudscraper",
+            lambda: fresh_cloud.get(
+                chosen,
+                headers=_build_upstream_headers(song, request_headers, None),
+                stream=True,
+                timeout=timeout,
+                allow_redirects=True,
             ),
         ),
     ]
     for source, opener in clients:
         try:
-            yield source, opener()
+            yield source, opener(), None
         except Exception as exc:
             print(f"[stream] upstream client failed {song.song_id} via {source}: {exc}")
+            yield source, None, exc
 
 
 def _is_valid_audio_response(response) -> bool:
@@ -290,8 +373,24 @@ def _resolve_stream_response(song, request_headers: dict[str, str]):
     if failed_until > time.time():
         return None, "Recent upstream failure still cooling down"
     last_error = "No upstream audio URL available"
+    cf_signals = 0
     for chosen in _upstream_candidates(song):
-        for source, response in _open_upstream_candidates(song, chosen, request_headers):
+        for source, response, exc in _open_upstream_candidates(song, chosen, request_headers):
+            if exc is not None:
+                # curl_cffi raises "Unrecognized content encoding" only when
+                # Cloudflare returns a WAF challenge response that libcurl can't
+                # decode (a reliable signal for these CDN URLs). Two such
+                # signals in a row means there's no point trying further HTTP
+                # clients — short-circuit so the caller can fall back to
+                # Playwright immediately.
+                if "Unrecognized content encoding" in str(exc):
+                    cf_signals += 1
+                    if cf_signals >= 2:
+                        _mark_album_cf_blocked(song.album_url)
+                        failed_attempt_cache[song.song_id] = time.time() + FAILED_URL_TTL_SECONDS
+                        return None, "Cloudflare WAF challenge: routing to Playwright"
+                last_error = f"Upstream client failed via {source}: {exc}"
+                continue
             if not _is_valid_audio_response(response):
                 last_error = f"Rejected upstream response via {source} status={response.status_code} type={response.headers.get('content-type', '')}"
                 print(f"[stream] upstream rejection {song.song_id}: {last_error}")
@@ -299,12 +398,12 @@ def _resolve_stream_response(song, request_headers: dict[str, str]):
                 continue
             try:
                 upstream_iter, first_chunk = _prime_audio_response(response)
-            except Exception as exc:
-                last_error = f"Rejected upstream response via {source}: {exc}"
+            except Exception as prime_exc:
+                last_error = f"Rejected upstream response via {source}: {prime_exc}"
                 print(f"[stream] upstream rejection {song.song_id}: {last_error}")
                 continue
             print(f"[stream] upstream ok {song.song_id} via {source}")
-            resolved_url_cache[song.song_id] = (time.time() + RESOLVED_URL_TTL_SECONDS, [chosen])
+            _mark_url_verified(song.song_id, chosen)
             return response, upstream_iter, first_chunk, source
     failed_attempt_cache[song.song_id] = time.time() + FAILED_URL_TTL_SECONDS
     return None, last_error
@@ -314,22 +413,83 @@ def _resolution_failed(resolved) -> bool:
     return isinstance(resolved, tuple) and len(resolved) == 2 and resolved[0] is None
 
 
-def _refresh_song(song_id: str):
+def _playwright_fallback_to_cache(song) -> Path | None:
+    """Download the song via Playwright into the local cache, or return None.
+
+    Used as a last resort when curl_cffi/cloudscraper are blocked by Cloudflare
+    on this album's CDN URLs. Playwright triggers a real Chrome navigation,
+    which masstamilan's WAF allows through. The download is slow (~5–10 s the
+    first time we run Playwright) but unblocks otherwise-unplayable albums.
+    """
+    if not playwright_downloader.available():
+        return None
+    candidates = _upstream_candidates(song)
+    if not candidates:
+        return None
+    final_path = cache_path(song.song_id)
+    part_path = temp_cache_path(song.song_id)
+    last_error: Exception | None = None
+    for chosen in candidates:
+        try:
+            part_path.parent.mkdir(parents=True, exist_ok=True)
+            playwright_downloader.download(chosen, referer=song.album_url, dest_path=part_path)
+            if not validate_cache_file(part_path):
+                print(f"[stream] playwright file rejected {song.song_id}")
+                part_path.unlink(missing_ok=True)
+                continue
+            part_path.replace(final_path)
+            store_shared_cache(song.song_id, final_path)
+            trim_cache()
+            _mark_url_verified(song.song_id, chosen)
+            _mark_album_cf_blocked(song.album_url)
+            print(f"[stream] playwright cache success {song.song_id}")
+            return final_path
+        except Exception as exc:
+            last_error = exc
+            print(f"[stream] playwright failed {song.song_id} url={chosen[:80]}: {exc}")
+            part_path.unlink(missing_ok=True)
+    if last_error is not None:
+        _mark_prefetch_error(f"{song.song_id}: playwright failed: {last_error}")
+    return None
+
+
+def _refresh_song(song_id: str, *, polite_delay: bool = True):
     song = _get_song_cached(song_id)
     if not song:
         return None
     lock = _refresh_lock(song.album_url)
     with lock:
-        latest = _get_song_cached(song_id, force_refresh=True)
-        if latest and _upstream_candidates(latest):
-            song = latest
-        print(f"[stream] refresh start {song_id}")
-        album = site_scraper.refresh_album(song.album_url)
-        from .repository import upsert_album
+        print(f"[stream] refresh start {song_id} album={song.album_url}")
+        album = site_scraper.refresh_album(song.album_url, polite_delay=polite_delay)
+        from .repository import album_song_ids, album_song_ids_by_url, upsert_album
 
         upsert_album(album)
-        print(f"[stream] refresh success {song_id}")
-    failed_attempt_cache.pop(song_id, None)
+        # Look up sibling song_ids both by the scraped album_id AND by album_url.
+        # The two can drift when slugify/canonicalize rules change, so trusting a
+        # single key would silently miss siblings and cause a redundant JIT
+        # refresh when the user plays the next track in the album.
+        sibling_ids: list[str] = []
+        seen: set[str] = set()
+        for source in (
+            album_song_ids(getattr(album, "album_id", "")),
+            album_song_ids_by_url(song.album_url),
+        ):
+            for sid in source:
+                if sid not in seen:
+                    seen.add(sid)
+                    sibling_ids.append(sid)
+        if not sibling_ids:
+            sibling_ids = [song_id]
+        # Invalidate every track in this album so newly written URLs are used
+        # immediately. Without this we'd keep hitting the old (verified-failed)
+        # entries in resolved_url_cache. Mark each track as freshly scraped so
+        # the next stream skips the JIT refresh — the URLs we just wrote came
+        # straight from the source and are the freshest possible.
+        for sid in sibling_ids:
+            _invalidate_song_url_caches(sid)
+            metadata_cache.pop(sid, None)
+            _mark_song_freshly_scraped(sid)
+        print(f"[stream] refresh success {song_id} siblings={len(sibling_ids)}")
     return _get_song_cached(song_id, force_refresh=True)
 
 
@@ -385,7 +545,11 @@ def _prefetch_to_cache(song_id: str) -> bool:
             print(f"[stream] refresh retry {song_id}")
             resolved = _resolve_stream_response(song, {})
             if _resolution_failed(resolved):
-                return False
+                # Cloudflare-blocked album: fall back to Playwright so the
+                # background prefetch still warms the cache for albums whose
+                # CDN URLs reject every plain HTTP client.
+                cached = _playwright_fallback_to_cache(song)
+                return cached is not None
 
         response, upstream_iter, first_chunk, source = resolved
         if response.status_code != 200:
@@ -526,15 +690,25 @@ def stream_song(song_id: str, request_headers: dict[str, str] | None = None):
     started_at = time.perf_counter()
     _mark_interactive_priority()
     request_headers = {key.lower(): value for key, value in (request_headers or {}).items()}
+    print(f"[stream] STREAM_REQUEST song_id={song_id}")
     song = _get_song_cached(song_id)
     if not song:
+        print(f"[stream] TRACK_FOUND=no song_id={song_id}")
         raise FileNotFoundError("Song not found")
     metadata_ms = (time.perf_counter() - started_at) * 1000
+    print(
+        f"[stream] TRACK_FOUND=yes song_id={song_id} title={song.track_name!r} "
+        f"album={song.album_name!r} db_lookup_ms={metadata_ms:.1f} "
+        f"has_320={bool(song.url_320kbps)} has_128={bool(song.url_128kbps)}"
+    )
 
     cached = _valid_local_cache(song_id)
     cache_lookup_ms = (time.perf_counter() - started_at) * 1000
     if cached:
-        print(f"[stream] song_id={song_id} cache_hit metadata_ms={metadata_ms:.1f} cache_lookup_ms={cache_lookup_ms:.1f}")
+        print(
+            f"[stream] CACHE_HIT=yes song_id={song_id} cache_lookup_ms={cache_lookup_ms:.1f} "
+            f"size={cached.stat().st_size}"
+        )
         file_size = cached.stat().st_size
         parsed_range = _parse_range_header(request_headers.get("range"), file_size)
         headers = cache_response_headers(cached)
@@ -557,24 +731,114 @@ def stream_song(song_id: str, request_headers: dict[str, str] | None = None):
             "headers": headers,
         }
 
-    print(f"[stream] song_id={song_id} cache_miss metadata_ms={metadata_ms:.1f} cache_lookup_ms={cache_lookup_ms:.1f}")
+    print(
+        f"[stream] CACHE_HIT=no song_id={song_id} cache_lookup_ms={cache_lookup_ms:.1f}"
+    )
 
     if not _upstream_candidates(song):
-        song = _refresh_song(song_id)
+        song = _refresh_song(song_id, polite_delay=False)
         if not song or not _upstream_candidates(song):
             raise FileNotFoundError("No upstream audio URL available")
+
+    # If this album is known to be Cloudflare-blocked (a previous song from it
+    # only succeeded via Playwright), skip the doomed curl/cloudscraper path
+    # entirely and jump straight to the Playwright fallback. This turns a ~8 s
+    # cold play into ~2 s for songs in known-blocked albums.
+    if _is_album_cf_blocked(song.album_url):
+        print(f"[stream] CF_BLOCKED_FAST_PATH song_id={song_id} album={song.album_url}")
+        cached = _playwright_fallback_to_cache(song)
+        if cached:
+            file_size = cached.stat().st_size
+            parsed_range = _parse_range_header(request_headers.get("range"), file_size)
+            headers = cache_response_headers(cached)
+            first_byte_ms = (time.perf_counter() - started_at) * 1000
+            _set_stream_first_byte(first_byte_ms)
+            print(f"[stream] PLAYWRIGHT_OK song_id={song_id} size={file_size} first_byte_ms={first_byte_ms:.1f}")
+            if parsed_range:
+                start, end = parsed_range
+                headers["content-range"] = f"bytes {start}-{end}/{file_size}"
+                headers["content-length"] = str(end - start + 1)
+                return {
+                    "type": "cache-stream",
+                    "iterator": _file_iterator(cached, start, end),
+                    "content_type": "audio/mpeg",
+                    "status_code": 206,
+                    "headers": headers,
+                }
+            return {
+                "type": "cache",
+                "path": cached,
+                "content_type": "audio/mpeg",
+                "status_code": 200,
+                "headers": headers,
+            }
+        # If Playwright fails too, fall through to the normal path so we still
+        # get a meaningful error rather than silent failure.
+
+    # JIT freshness: if we have not confirmed this song's URL within the verified
+    # TTL AND it has not just been scraped, refresh the album page first. Stored
+    # URLs are time- and IP-bound by the source CDN, so a stored URL we have
+    # never streamed before may be stale. The freshly_scraped marker lets us skip
+    # the ~700ms refresh when album-prefetch already pulled fresh URLs — those
+    # URLs are the freshest possible and the very next stream attempt should use
+    # them directly. The fallback below still kicks in if the open fails.
+    if not _is_url_verified(song_id) and not _is_song_freshly_scraped(song_id):
+        try:
+            print(f"[stream] JIT_REFRESH song_id={song_id}")
+            refreshed_song = _refresh_song(song_id, polite_delay=False)
+            if refreshed_song:
+                song = refreshed_song
+        except Exception as exc:
+            print(f"[stream] JIT refresh failed for {song_id}: {exc} — falling through to stored URL")
 
     resolve_started_at = time.perf_counter()
     resolved = _resolve_stream_response(song, request_headers)
     if _resolution_failed(resolved):
         _, last_error = resolved
-        song = _refresh_song(song_id)
-        if not song:
-            raise RuntimeError("Invalid upstream response and refresh failed")
-        print(f"[stream] refresh retry {song_id}")
-        resolved = _resolve_stream_response(song, request_headers)
+        # Cloudflare-blocked albums never recover by refreshing — the URL
+        # itself is fine, the WAF is the gate. Skip the redundant refresh+retry
+        # cycle (~5 s) and head straight to Playwright.
+        if _is_album_cf_blocked(song.album_url):
+            refreshed_error = last_error
+        else:
+            song = _refresh_song(song_id, polite_delay=False)
+            if not song:
+                raise RuntimeError("Invalid upstream response and refresh failed")
+            print(f"[stream] refresh retry {song_id}")
+            resolved = _resolve_stream_response(song, request_headers)
         if _resolution_failed(resolved):
             _, refreshed_error = resolved
+            # Last resort: some albums are gated behind a Cloudflare WAF
+            # challenge that no plain HTTP client can solve. A real Chromium
+            # navigation does pass it, so download via Playwright into the
+            # cache and serve the cached file like a normal cache hit.
+            print(f"[stream] PLAYWRIGHT_FALLBACK song_id={song_id}")
+            cached = _playwright_fallback_to_cache(song)
+            if cached:
+                file_size = cached.stat().st_size
+                parsed_range = _parse_range_header(request_headers.get("range"), file_size)
+                headers = cache_response_headers(cached)
+                first_byte_ms = (time.perf_counter() - started_at) * 1000
+                _set_stream_first_byte(first_byte_ms)
+                print(f"[stream] PLAYWRIGHT_OK song_id={song_id} size={file_size} first_byte_ms={first_byte_ms:.1f}")
+                if parsed_range:
+                    start, end = parsed_range
+                    headers["content-range"] = f"bytes {start}-{end}/{file_size}"
+                    headers["content-length"] = str(end - start + 1)
+                    return {
+                        "type": "cache-stream",
+                        "iterator": _file_iterator(cached, start, end),
+                        "content_type": "audio/mpeg",
+                        "status_code": 206,
+                        "headers": headers,
+                    }
+                return {
+                    "type": "cache",
+                    "path": cached,
+                    "content_type": "audio/mpeg",
+                    "status_code": 200,
+                    "headers": headers,
+                }
             raise RuntimeError(f"Invalid upstream response after refresh: {refreshed_error or last_error}")
 
     upstream_open_ms = (time.perf_counter() - resolve_started_at) * 1000
@@ -584,8 +848,9 @@ def stream_song(song_id: str, request_headers: dict[str, str] | None = None):
     headers = _response_headers(response)
     content_type = headers.get("content-type", "audio/mpeg")
     print(
-        f"[stream] song_id={song_id} source={source} upstream_open_ms={upstream_open_ms:.1f} "
-        f"first_byte_ms={first_byte_ms:.1f} status={response.status_code}"
+        f"[stream] UPSTREAM_OK song_id={song_id} source={source} "
+        f"upstream_status={response.status_code} content_type={content_type!r} "
+        f"upstream_open_ms={upstream_open_ms:.1f} first_byte_ms={first_byte_ms:.1f}"
     )
 
     def iterator() -> Iterator[bytes]:
