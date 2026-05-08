@@ -89,8 +89,11 @@ jobs:
                    cloudflare/scripts/validate_generated_data.py \
                    cloudflare/scripts/validate_release.py \
                    cloudflare/scripts/prepare_release.py \
+                   cloudflare/scripts/check_refresh_report.py \
+                   cloudflare/scripts/validate_refresh_health.py \
                    apps/api/app/scripts/refresh_catalog.py \
                    apps/api/requirements.txt \
+                   apps/api/data/melodify.sqlite3 \
                    .release/active-slot.json; do
             [[ -f "$f" ]] || { echo "::error::Required file missing: $f"; exit 1; }
           done
@@ -139,45 +142,81 @@ jobs:
             echo "full=${{ inputs.full_refresh }}" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Run catalog refresh (full=${{ steps.mode.outputs.full }})
-        env:
-          DATABASE_PATH: ${{ github.workspace }}/apps/api/data/melodify.sqlite3
-          PYTHONPATH: ${{ github.workspace }}/apps/api
+      - name: Bootstrap baseline DB (copy committed catalogue → working DB)
+        # Refresh writes into a *copy* in the per-run release dir. The
+        # committed apps/api/data/melodify.sqlite3 is never mutated, so if
+        # the upstream blocks us mid-scrape we still have a known-good
+        # catalogue to compare against and (importantly) to leave the live
+        # site pointed at.
         run: |
           set -euo pipefail
-          mkdir -p "$RELEASE_DIR" "$(dirname "$DATABASE_PATH")"
+          src="apps/api/data/melodify.sqlite3"
+          dst="$RELEASE_DIR/refreshed.sqlite3"
+          cp "$src" "$dst"
+          echo "Baseline copied: $(stat -c%s "$src" 2>/dev/null || stat -f%z "$src") bytes → $dst"
+          echo "REFRESHED_DB=$dst" >> "$GITHUB_ENV"
+          echo "BASELINE_DB=$src" >> "$GITHUB_ENV"
+
+      - name: Run catalog refresh (full=${{ steps.mode.outputs.full }})
+        env:
+          # Point the scraper at the working *copy*, not the committed file.
+          DATABASE_PATH: ${{ github.workspace }}/${{ env.RELEASE_DIR }}/refreshed.sqlite3
+          PYTHONPATH: ${{ github.workspace }}/apps/api
+          # Slow the scraper down on CI: GitHub egress IPs are flagged more
+          # aggressively than residential ones, so be polite.
+          MASSTAMILAN_DELAY_SECONDS: "0.6"
+        run: |
+          set -euo pipefail
           report="$RELEASE_DIR/refresh-report.json"
+          echo "REFRESH_REPORT=$report" >> "$GITHUB_ENV"
           echo "::group::Running refresh_catalog.py"
+          set +e
           if [[ "${{ steps.mode.outputs.full }}" == "true" ]]; then
             python -m app.scripts.refresh_catalog \
-              --full --workers 4 --batch-size 16 \
+              --full --workers 2 --batch-size 8 \
               --report-path "$report"
           else
             python -m app.scripts.refresh_catalog \
-              --workers 4 --batch-size 16 \
+              --workers 2 --batch-size 8 \
               --report-path "$report"
           fi
+          refresh_exit=$?
+          set -e
           echo "::endgroup::"
-          # Surface a one-line summary so the build log makes intent clear.
-          python - "$report" <<'PY'
-          import json, sys
-          report = json.load(open(sys.argv[1]))
-          summary = report["summary"]
-          print("REFRESH SUMMARY:")
-          print(f"  mode               = {report['mode']}")
-          print(f"  status             = {report['status']}")
-          print(f"  pages scanned      = {summary['listing_pages_scanned'] + summary['movie_index_pages_scanned'] + summary['section_pages_scanned'] + summary['year_pages_scanned']}")
-          print(f"  albums (add+upd)   = {summary['albums_added'] + summary['albums_updated']}")
-          print(f"  songs total        = {summary['songs_total']}")
-          if not report["success"]:
-              raise SystemExit("Refresh reported success=false")
-          PY
+          # Refresh exited non-zero — the report still tells us how blocked
+          # we were. Don't bail here; let the dedicated check step decide.
+          echo "refresh exit code: $refresh_exit"
 
-      - name: Export SQLite → D1 seed files
+      - name: Check refresh-report (challenge ratio + progress)
+        # First gate: was the scrape itself usable? Reads the JSON report and
+        # rejects runs where most listing pages were challenged or where no
+        # albums were added/updated. Prints the explicit "Upstream challenge
+        # detected. Skipping unsafe deploy." message on failure.
+        run: |
+          set -euo pipefail
+          python cloudflare/scripts/check_refresh_report.py \
+            --report "$REFRESH_REPORT" \
+            --max-challenge-ratio 0.4 \
+            --require-progress
+
+      - name: Cliff-fall guard (compare new DB against committed baseline)
+        # Second gate: even if the report looks OK, refuse to ship a DB
+        # whose row counts have collapsed vs the committed catalogue. This
+        # is the last line of defence against challenge HTML smuggled in
+        # as song rows.
+        run: |
+          set -euo pipefail
+          python cloudflare/scripts/validate_refresh_health.py \
+            --baseline "$BASELINE_DB" \
+            --refreshed "$REFRESHED_DB" \
+            --min-coverage 0.85 \
+            --min-url-coverage 0.95
+
+      - name: Export refreshed SQLite → D1 seed files
         run: |
           set -euo pipefail
           python cloudflare/scripts/export_d1_sql.py \
-            --db apps/api/data/melodify.sqlite3 \
+            --db "$REFRESHED_DB" \
             --out cloudflare/data/seed.sql
 
       - name: Validate generated data
@@ -185,7 +224,7 @@ jobs:
           set -euo pipefail
           python cloudflare/scripts/validate_generated_data.py \
             --data-dir cloudflare/data \
-            --source-db apps/api/data/melodify.sqlite3
+            --source-db "$REFRESHED_DB"
 
       - name: Build the React frontend (apps/web)
         run: |
@@ -305,7 +344,10 @@ jobs:
         with:
           name: refresh-diagnostics-${{ github.run_id }}
           if-no-files-found: ignore
+          retention-days: 7
           path: |
             ${{ env.RELEASE_DIR }}/refresh-report.json
             ${{ env.RELEASE_DIR }}/wrangler.deploy.jsonc
+            ${{ env.RELEASE_DIR }}/refreshed.sqlite3
             cloudflare/data/schema.sql
+            cloudflare/data/seed.sql

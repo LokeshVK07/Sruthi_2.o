@@ -35,16 +35,28 @@ HEADERS = {
 }
 
 # Cloudflare's anti-bot script is embedded on EVERY page served from a
-# CF-fronted origin (including normal album/listing pages), so its mere
-# presence does NOT indicate a challenge. A real interstitial has a tiny body
-# AND interstitial-specific copy below.
-CHALLENGE_MARKERS = (
+# CF-fronted origin (including normal album/listing pages), so generic
+# tokens like "cf-chl" or "challenge" alone do NOT indicate a real
+# interstitial. We split markers into two buckets:
+#   STRONG — phrases that virtually never appear in legit catalogue HTML
+#            and short-circuit to "blocked" regardless of body size.
+#   WEAK   — generic CF infrastructure mentions; only meaningful when the
+#            response is also tiny / status-code-suspicious.
+STRONG_CHALLENGE_MARKERS = (
     "just a moment",
+    "checking your browser",
+    "verifying you are human",
     "enable javascript and cookies to continue",
     "attention required",
-    "cf-browser-verification",
-    "checking your browser",
+    "ddos protection by cloudflare",
 )
+WEAK_CHALLENGE_MARKERS = (
+    "cf-browser-verification",
+    "challenge-platform",
+    "cf-chl",
+)
+# Backwards-compatible alias still imported by tests / log strings.
+CHALLENGE_MARKERS = STRONG_CHALLENGE_MARKERS + WEAK_CHALLENGE_MARKERS
 
 
 def normalize(value: str) -> str:
@@ -56,25 +68,29 @@ def is_challenge_page(html: str, status_code: int | None = None, headers: dict[s
 
     A real interstitial:
       - returns 403/429/503, or 200 with a very small body
-      - contains a short, specific phrase ("just a moment", etc.)
-      - lacks the normal site title
+      - contains a short, specific phrase ("just a moment", etc.) — STRONG
+      - or contains generic CF infrastructure markup AND a small body — WEAK
 
-    A normal page that happens to include /cdn-cgi/challenge-platform/ is NOT
-    a challenge. Treating it as one is what blocked the entire refresh path.
+    A normal page that merely embeds /cdn-cgi/challenge-platform/ is NOT a
+    challenge — the WEAK markers therefore require a small body before we
+    treat them as such. STRONG markers are conclusive on their own.
     """
     lower = (html or "").lower()
     body_len = len(lower.strip())
     header_map = {str(key).lower(): str(value).lower() for key, value in (headers or {}).items()}
     content_type = header_map.get("content-type", "")
 
-    has_interstitial_marker = any(marker in lower for marker in CHALLENGE_MARKERS)
-
     if status_code in {403, 429} and ("text/html" in content_type or not content_type):
         return True
     if status_code == 503 and body_len < 4096:
         return True
-    if has_interstitial_marker and body_len < 8192:
+
+    if any(marker in lower for marker in STRONG_CHALLENGE_MARKERS):
         return True
+
+    if any(marker in lower for marker in WEAK_CHALLENGE_MARKERS) and body_len < 8192:
+        return True
+
     return False
 
 
