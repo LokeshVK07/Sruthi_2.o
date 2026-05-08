@@ -44,6 +44,41 @@ function bad(message) {
   return jsonResponse({ ok: false, error: message }, { status: 400 });
 }
 
+/**
+ * Wrap every handler so an uncaught DB error returns a structured 503/412
+ * instead of Cloudflare's opaque error 1101. Catches "no such table" /
+ * "no such database" and points the user at the seed step.
+ */
+function withErrorHandling(handler) {
+  return async (...args) => {
+    try {
+      return await handler(...args);
+    } catch (error) {
+      const message = String((error && error.message) || error);
+      const looksLikeMissingSchema =
+        /no such table|D1_ERROR.*no such|no such column/i.test(message);
+      if (looksLikeMissingSchema) {
+        return jsonResponse(
+          {
+            ok: false,
+            error: "Catalogue not seeded yet",
+            detail:
+              "Paste cloudflare/data/schema.sql into the D1 Console once, " +
+              "then visit /api/admin/seed?token=<SEED_TOKEN> to populate the " +
+              "tables. See cloudflare/README.md.",
+          },
+          { status: 503 },
+        );
+      }
+      console.error("worker error:", error);
+      return jsonResponse(
+        { ok: false, error: "Internal error", detail: message.slice(0, 240) },
+        { status: 500 },
+      );
+    }
+  };
+}
+
 // ---------------------------------------------------------------------------
 // Catalogue helpers
 // ---------------------------------------------------------------------------
@@ -95,6 +130,34 @@ function cleanAlbumName(name) {
 // ---------------------------------------------------------------------------
 // API handlers
 // ---------------------------------------------------------------------------
+
+async function handleDiag(env) {
+  const diag = { ok: true, schema: { albums: false, songs: false }, counts: {} };
+  try {
+    await env.DB.prepare("SELECT 1 FROM albums LIMIT 1").first();
+    diag.schema.albums = true;
+  } catch (_e) { /* table missing */ }
+  try {
+    await env.DB.prepare("SELECT 1 FROM songs LIMIT 1").first();
+    diag.schema.songs = true;
+  } catch (_e) { /* table missing */ }
+  if (diag.schema.albums) {
+    const row = await env.DB.prepare("SELECT COUNT(*) AS n FROM albums").first();
+    diag.counts.albums = Number(row?.n ?? 0);
+  }
+  if (diag.schema.songs) {
+    const row = await env.DB.prepare("SELECT COUNT(*) AS n FROM songs").first();
+    diag.counts.songs = Number(row?.n ?? 0);
+  }
+  diag.seedTokenSet = Boolean(env.SEED_TOKEN);
+  diag.nextStep =
+    !diag.schema.albums || !diag.schema.songs
+      ? "Paste cloudflare/data/schema.sql into the D1 Console."
+      : !diag.counts.songs
+        ? "Visit /api/admin/seed?token=<SEED_TOKEN> to populate the catalogue."
+        : "Catalogue ready.";
+  return jsonResponse(diag);
+}
 
 async function handleHome(env) {
   const recent = await env.DB.prepare(
@@ -548,23 +611,27 @@ export default {
     if (path === "/api/health") {
       return jsonResponse({ ok: true, runtime: "cloudflare-workers" });
     }
-    if (path === "/api/library/home") return handleHome(env);
-    if (path === "/api/library/songs") return handleSongs(env, url);
-    if (path === "/api/library") return handleSongs(env, url);
-    if (path === "/api/albums") return handleAlbums(env);
+    // Lightweight diagnostics: tells you whether D1 schema/data are present
+    // without throwing — useful while bringing the deploy up.
+    if (path === "/api/diag") return withErrorHandling(handleDiag)(env);
+    if (path === "/api/library/home") return withErrorHandling(handleHome)(env);
+    if (path === "/api/library/songs" || path === "/api/library") {
+      return withErrorHandling(handleSongs)(env, url);
+    }
+    if (path === "/api/albums") return withErrorHandling(handleAlbums)(env);
     if (path.startsWith("/api/albums/")) {
-      return handleAlbum(env, decodeURIComponent(path.slice("/api/albums/".length)));
+      return withErrorHandling(handleAlbum)(env, decodeURIComponent(path.slice("/api/albums/".length)));
     }
     if (path.startsWith("/api/song/")) {
-      return handleSong(env, decodeURIComponent(path.slice("/api/song/".length)));
+      return withErrorHandling(handleSong)(env, decodeURIComponent(path.slice("/api/song/".length)));
     }
     if (path === "/api/search" || path === "/api/search/all") {
-      return handleSearch(env, url);
+      return withErrorHandling(handleSearch)(env, url);
     }
     if (path.startsWith("/api/stream/")) {
-      return handleStream(env, decodeURIComponent(path.slice("/api/stream/".length)), request);
+      return withErrorHandling(handleStream)(env, decodeURIComponent(path.slice("/api/stream/".length)), request);
     }
-    if (path === "/api/admin/seed") return handleSeed(env, url);
+    if (path === "/api/admin/seed") return withErrorHandling(handleSeed)(env, url);
 
     // Stubs so the frontend's existing calls don't 404.
     if (
