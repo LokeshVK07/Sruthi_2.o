@@ -46,7 +46,10 @@ def is_fts_table(name: str) -> bool:
     return any(name == pat or name.startswith(pat + "_") for pat in FTS_TABLE_PATTERNS)
 
 
-def write_table(connection: sqlite3.Connection, name: str, out, batch_size: int = 500):
+def write_table(connection: sqlite3.Connection, name: str, out, batch_size: int = 50):
+    # 50 rows × ~700 bytes ≈ 35 KB per INSERT, well under D1's per-statement
+    # size limit (~100 KB). Larger batches trip SQLITE_TOOBIG on `wrangler d1
+    # execute --remote`.
     cursor = connection.execute(f'SELECT * FROM "{name}"')
     columns = [c[0] for c in cursor.description]
     column_list = ", ".join(f'"{col}"' for col in columns)
