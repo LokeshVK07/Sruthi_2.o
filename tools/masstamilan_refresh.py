@@ -36,6 +36,13 @@ from app.scripts.refresh_catalog import main as refresh_main  # noqa: E402
 
 
 if __name__ == "__main__":
-    # Default DATABASE_PATH if user hasn't set it; matches apps/api defaults.
-    os.environ.setdefault("DATABASE_PATH", str(API_DIR / "data/melodify.sqlite3"))
+    # Default DATABASE_PATH if the caller hasn't set one. The CI workflow at
+    # .github/workflows/background-refresh.yml expects the refreshed catalogue
+    # to land at <repo>/data/sruthi.db, so the default points there. Local
+    # callers that want the apps/api default can run app.scripts.refresh_catalog
+    # directly (e.g. `npm run scrape:refresh:full`) or set DATABASE_PATH
+    # explicitly before invoking this wrapper.
+    repo_db = REPO_ROOT / "data/sruthi.db"
+    repo_db.parent.mkdir(parents=True, exist_ok=True)
+    os.environ.setdefault("DATABASE_PATH", str(repo_db))
     refresh_main()

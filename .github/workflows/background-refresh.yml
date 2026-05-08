@@ -1,353 +1,400 @@
-name: Background catalog refresh
-
-# When this runs:
-#   - Manually from the Actions tab (workflow_dispatch). The `full_refresh`
-#     input lets you opt out of the full rescrape if you only want to push
-#     the existing local catalogue out.
-#   - Automatically every Monday and Thursday at 18:30 UTC. Scheduled runs
-#     always do a full refresh.
-#
-# What it does (high level):
-#   1. Re-scrapes the catalogue (page-wise listings + movie-index discovery
-#      + per-album rescrape).
-#   2. Exports SQLite → schema.sql + seed.sql + ndjson files.
-#   3. Validates the generated data BEFORE touching Cloudflare.
-#   4. Renders a wrangler config pointed at the *inactive* D1 slot, imports
-#      schema + seed into it, validates the imported D1, then deploys the
-#      Worker bound to that inactive slot.
-#   5. Smoke-tests the live URL.
-#   6. Promotes: the previously inactive slot becomes active, marker file
-#      committed back to main.
-#
-# If anything before step 6 fails, the live Worker keeps serving the
-# previous active slot — the inactive one is the only thing we touched.
+name: Background Refresh Tamil
 
 on:
   workflow_dispatch:
     inputs:
       full_refresh:
-        description: "Run a full re-scrape (uncheck for a fast incremental)"
+        description: Run a full catalog refresh instead of incremental mode
+        required: false
+        default: false
         type: boolean
-        default: true
   schedule:
-    # 18:30 UTC Mon + Thu — early morning Tue/Fri in IST/AEST.
-    - cron: "30 18 * * 1,4"
+    - cron: "17 */6 * * *"
 
 permissions:
-  # Required so the workflow can commit the updated active-slot marker back
-  # to main after a successful promotion.
-  contents: write
+  contents: read
+  actions: write
 
 concurrency:
-  group: background-refresh
+  group: sruthi-background-refresh-tamil
   cancel-in-progress: false
 
-env:
-  PYTHON_VERSION: "3.12"
-  NODE_VERSION: "20"
-  WORKER_NAME: ${{ vars.WORKER_NAME || 'sruthi-2o' }}
-  WRANGLER_DATABASE_BASENAME: ${{ vars.WRANGLER_DATABASE_BASENAME || 'sruthi-catalog' }}
+defaults:
+  run:
+    shell: bash
 
 jobs:
   refresh-and-deploy:
+    name: Refresh and Deploy Tamil
     runs-on: ubuntu-latest
-    timeout-minutes: 60
-    defaults:
-      run:
-        shell: bash
+    timeout-minutes: 90
     env:
       CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-      CLOUDFLARE_D1_PRIMARY_DATABASE_ID: ${{ secrets.CLOUDFLARE_D1_PRIMARY_DATABASE_ID }}
-      CLOUDFLARE_D1_SECONDARY_DATABASE_ID: ${{ secrets.CLOUDFLARE_D1_SECONDARY_DATABASE_ID }}
-      WORKER_PUBLIC_URL: ${{ vars.WORKER_PUBLIC_URL }}
-      RELEASE_DIR: .release/work-${{ github.run_id }}
-
+      GH_VARIABLES_TOKEN: ${{ secrets.GH_VARIABLES_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+      SRUTHI_ACTIVE_D1_SLOT: ${{ vars.SRUTHI_ACTIVE_D1_SLOT }}
+      SRUTHI_D1_DB_A_ID: ${{ vars.SRUTHI_D1_DB_A_ID }}
+      SRUTHI_D1_DB_A_NAME: ${{ vars.SRUTHI_D1_DB_A_NAME }}
+      SRUTHI_D1_DB_B_ID: ${{ vars.SRUTHI_D1_DB_B_ID }}
+      SRUTHI_D1_DB_B_NAME: ${{ vars.SRUTHI_D1_DB_B_NAME }}
+      WRANGLER_SEND_METRICS: "false"
+      GENERATED_WRANGLER_CONFIG: cloudflare/.generated/wrangler.deploy.jsonc
+      RELEASE_MANIFEST: cloudflare/.generated/release-manifest.json
+      RELEASE_DUCKDB: cloudflare/.generated/release-check.duckdb
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
-        with:
-          # Need full history so the auto-commit step can fast-forward push.
-          fetch-depth: 0
 
-      - name: Validate required secrets and inputs early
-        run: |
-          set -euo pipefail
-          missing=()
-          [[ -z "${CLOUDFLARE_API_TOKEN:-}" ]] && missing+=(CLOUDFLARE_API_TOKEN)
-          [[ -z "${CLOUDFLARE_ACCOUNT_ID:-}" ]] && missing+=(CLOUDFLARE_ACCOUNT_ID)
-          [[ -z "${CLOUDFLARE_D1_PRIMARY_DATABASE_ID:-}" ]] && missing+=(CLOUDFLARE_D1_PRIMARY_DATABASE_ID)
-          [[ -z "${CLOUDFLARE_D1_SECONDARY_DATABASE_ID:-}" ]] && missing+=(CLOUDFLARE_D1_SECONDARY_DATABASE_ID)
-          if (( ${#missing[@]} )); then
-            echo "::error::Missing required secrets: ${missing[*]}"
-            exit 1
-          fi
-          for f in cloudflare/wrangler.jsonc cloudflare/src/worker.js \
-                   cloudflare/scripts/export_d1_sql.py \
-                   cloudflare/scripts/render_wrangler_config.py \
-                   cloudflare/scripts/validate_wrangler_config.py \
-                   cloudflare/scripts/validate_generated_data.py \
-                   cloudflare/scripts/validate_release.py \
-                   cloudflare/scripts/prepare_release.py \
-                   cloudflare/scripts/check_refresh_report.py \
-                   cloudflare/scripts/validate_refresh_health.py \
-                   apps/api/app/scripts/refresh_catalog.py \
-                   apps/api/requirements.txt \
-                   apps/api/data/melodify.sqlite3 \
-                   .release/active-slot.json; do
-            [[ -f "$f" ]] || { echo "::error::Required file missing: $f"; exit 1; }
-          done
-          mkdir -p "$RELEASE_DIR"
-          echo "RELEASE_DIR=$RELEASE_DIR" >> "$GITHUB_ENV"
-
-      - name: Set up Python ${{ env.PYTHON_VERSION }}
+      - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: ${{ env.PYTHON_VERSION }}
-          cache: pip
-          cache-dependency-path: apps/api/requirements.txt
+          python-version: "3.11"
 
-      - name: Set up Node ${{ env.NODE_VERSION }}
+      - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: ${{ env.NODE_VERSION }}
-          cache: npm
-          cache-dependency-path: |
-            cloudflare/package-lock.json
-            apps/web/package-lock.json
-            package-lock.json
+          node-version: "20"
 
-      - name: Install Python dependencies
+      - name: Install workflow dependencies
         run: |
-          set -euo pipefail
           python -m pip install --upgrade pip
-          pip install -r apps/api/requirements.txt
-          # Playwright is optional for the workflow (the GitHub runner has
-          # outbound IP access masstamilan accepts). Skip its browser install
-          # to save 90 s and a few hundred MB.
+          python -m pip install duckdb requests beautifulsoup4 cloudscraper
+          npm install --global wrangler@4.81.1
 
-      - name: Install Cloudflare tooling
-        working-directory: cloudflare
+      - name: Validate workflow configuration
         run: |
           set -euo pipefail
-          npm ci
 
-      - name: Compute refresh mode
-        id: mode
-        run: |
-          set -euo pipefail
-          if [[ "${{ github.event_name }}" == "schedule" ]]; then
-            echo "full=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "full=${{ inputs.full_refresh }}" >> "$GITHUB_OUTPUT"
+          missing=()
+          for key in \
+            CLOUDFLARE_API_TOKEN \
+            GH_VARIABLES_TOKEN \
+            CLOUDFLARE_ACCOUNT_ID \
+            SRUTHI_D1_DB_A_ID \
+            SRUTHI_D1_DB_A_NAME \
+            SRUTHI_D1_DB_B_ID \
+            SRUTHI_D1_DB_B_NAME; do
+            if [[ -z "${!key:-}" ]]; then
+              missing+=("$key")
+            fi
+          done
+
+          if (( ${#missing[@]} > 0 )); then
+            echo "::error::Missing required GitHub Actions secrets/variables: ${missing[*]}"
+            exit 1
           fi
 
-      - name: Bootstrap baseline DB (copy committed catalogue → working DB)
-        # Refresh writes into a *copy* in the per-run release dir. The
-        # committed apps/api/data/melodify.sqlite3 is never mutated, so if
-        # the upstream blocks us mid-scrape we still have a known-good
-        # catalogue to compare against and (importantly) to leave the live
-        # site pointed at.
+          if [[ "${SRUTHI_D1_DB_A_ID}" == "${SRUTHI_D1_DB_B_ID}" ]]; then
+            echo "::error::D1 slot A and B database ids must be different."
+            exit 1
+          fi
+
+          if [[ "${SRUTHI_D1_DB_A_NAME}" == "${SRUTHI_D1_DB_B_NAME}" ]]; then
+            echo "::error::D1 slot A and B database names must be different."
+            exit 1
+          fi
+
+          if [[ -n "${SRUTHI_ACTIVE_D1_SLOT:-}" && "${SRUTHI_ACTIVE_D1_SLOT}" != "A" && "${SRUTHI_ACTIVE_D1_SLOT}" != "B" ]]; then
+            echo "::error::SRUTHI_ACTIVE_D1_SLOT must be A or B when configured."
+            exit 1
+          fi
+
+          required_files=(
+            ".github/workflows/background-refresh.yml"
+            "cloudflare/wrangler.jsonc"
+            "cloudflare/src/worker.js"
+            "cloudflare/public/index.html"
+            "cloudflare/public/app.js"
+            "cloudflare/public/styles.css"
+            "cloudflare/scripts/render_wrangler_config.py"
+            "cloudflare/scripts/prepare_release.py"
+            "cloudflare/scripts/export_d1_sql.py"
+            "cloudflare/data/release-baseline.json"
+            "tools/masstamilan_refresh.py"
+            "server.py"
+          )
+
+          for file in "${required_files[@]}"; do
+            if [[ ! -e "$file" ]]; then
+              echo "::error::Required workflow file is missing: $file"
+              exit 1
+            fi
+          done
+
+      - name: Resolve run mode
         run: |
           set -euo pipefail
-          src="apps/api/data/melodify.sqlite3"
-          dst="$RELEASE_DIR/refreshed.sqlite3"
-          cp "$src" "$dst"
-          echo "Baseline copied: $(stat -c%s "$src" 2>/dev/null || stat -f%z "$src") bytes → $dst"
-          echo "REFRESHED_DB=$dst" >> "$GITHUB_ENV"
-          echo "BASELINE_DB=$src" >> "$GITHUB_ENV"
+          full_refresh="false"
+          if [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" && "${{ inputs.full_refresh }}" == "true" ]]; then
+            full_refresh="true"
+          fi
+          echo "SRUTHI_FULL_REFRESH=${full_refresh}" >> "$GITHUB_ENV"
 
-      - name: Run catalog refresh (full=${{ steps.mode.outputs.full }})
+      - name: Verify Cloudflare token and account access
+        run: |
+          set -euo pipefail
+          if ! npx wrangler whoami >/tmp/wrangler-whoami.txt 2>/tmp/wrangler-whoami.err; then
+            echo "::error::Wrangler authentication check failed. Ensure CLOUDFLARE_API_TOKEN includes Workers, D1, and account membership access, and CLOUDFLARE_ACCOUNT_ID is correct."
+            cat /tmp/wrangler-whoami.err
+            exit 1
+          fi
+
+      - name: Select inactive D1 slot
+        run: |
+          set -euo pipefail
+          active="${SRUTHI_ACTIVE_D1_SLOT:-A}"
+          if [[ "$active" == "A" ]]; then
+            target="B"
+            db_id="${SRUTHI_D1_DB_B_ID}"
+            db_name="${SRUTHI_D1_DB_B_NAME}"
+          else
+            target="A"
+            db_id="${SRUTHI_D1_DB_A_ID}"
+            db_name="${SRUTHI_D1_DB_A_NAME}"
+          fi
+
+          echo "TARGET_DB_ID=$db_id" >> "$GITHUB_ENV"
+          echo "TARGET_DB_NAME=$db_name" >> "$GITHUB_ENV"
+          echo "TARGET_SLOT=$target" >> "$GITHUB_ENV"
+
+      - name: Verify GitHub variable update token access
         env:
-          # Point the scraper at the working *copy*, not the committed file.
-          DATABASE_PATH: ${{ github.workspace }}/${{ env.RELEASE_DIR }}/refreshed.sqlite3
-          PYTHONPATH: ${{ github.workspace }}/apps/api
-          # Slow the scraper down on CI: GitHub egress IPs are flagged more
-          # aggressively than residential ones, so be polite.
-          MASSTAMILAN_DELAY_SECONDS: "0.6"
+          GH_TOKEN: ${{ secrets.GH_VARIABLES_TOKEN }}
         run: |
           set -euo pipefail
-          report="$RELEASE_DIR/refresh-report.json"
-          echo "REFRESH_REPORT=$report" >> "$GITHUB_ENV"
-          echo "::group::Running refresh_catalog.py"
+
+          if [[ -z "${GH_TOKEN:-}" ]]; then
+            echo "::error::Missing required secret GH_VARIABLES_TOKEN. Create this repository secret before running the workflow."
+            exit 1
+          fi
+
+          if [[ "${TARGET_SLOT}" != "A" && "${TARGET_SLOT}" != "B" ]]; then
+            echo "::error::Resolved TARGET_SLOT must be A or B, got '${TARGET_SLOT}'."
+            exit 1
+          fi
+
+          if ! gh auth status >/tmp/gh-auth.txt 2>/tmp/gh-auth.err; then
+            echo "::error::GH_VARIABLES_TOKEN could not authenticate with GitHub CLI."
+            cat /tmp/gh-auth.err
+            exit 1
+          fi
+
           set +e
-          if [[ "${{ steps.mode.outputs.full }}" == "true" ]]; then
-            python -m app.scripts.refresh_catalog \
-              --full --workers 2 --batch-size 8 \
-              --report-path "$report"
-          else
-            python -m app.scripts.refresh_catalog \
-              --workers 2 --batch-size 8 \
-              --report-path "$report"
-          fi
-          refresh_exit=$?
+          gh api "repos/${GITHUB_REPOSITORY}/actions/variables/SRUTHI_ACTIVE_D1_SLOT" >/tmp/slot-var.json 2>/tmp/slot-var.err
+          status=$?
           set -e
-          echo "::endgroup::"
-          # Refresh exited non-zero — the report still tells us how blocked
-          # we were. Don't bail here; let the dedicated check step decide.
-          echo "refresh exit code: $refresh_exit"
 
-      - name: Check refresh-report (challenge ratio + progress)
-        # First gate: was the scrape itself usable? Reads the JSON report and
-        # rejects runs where most listing pages were challenged or where no
-        # albums were added/updated. Prints the explicit "Upstream challenge
-        # detected. Skipping unsafe deploy." message on failure.
-        run: |
-          set -euo pipefail
-          python cloudflare/scripts/check_refresh_report.py \
-            --report "$REFRESH_REPORT" \
-            --max-challenge-ratio 0.4 \
-            --require-progress
-
-      - name: Cliff-fall guard (compare new DB against committed baseline)
-        # Second gate: even if the report looks OK, refuse to ship a DB
-        # whose row counts have collapsed vs the committed catalogue. This
-        # is the last line of defence against challenge HTML smuggled in
-        # as song rows.
-        run: |
-          set -euo pipefail
-          python cloudflare/scripts/validate_refresh_health.py \
-            --baseline "$BASELINE_DB" \
-            --refreshed "$REFRESHED_DB" \
-            --min-coverage 0.85 \
-            --min-url-coverage 0.95
-
-      - name: Export refreshed SQLite → D1 seed files
-        run: |
-          set -euo pipefail
-          python cloudflare/scripts/export_d1_sql.py \
-            --db "$REFRESHED_DB" \
-            --out cloudflare/data/seed.sql
-
-      - name: Validate generated data
-        run: |
-          set -euo pipefail
-          python cloudflare/scripts/validate_generated_data.py \
-            --data-dir cloudflare/data \
-            --source-db "$REFRESHED_DB"
-
-      - name: Build the React frontend (apps/web)
-        run: |
-          set -euo pipefail
-          # Install workspace deps once at root, then build only @melodify/web.
-          npm ci --include=dev
-          npm run --workspace=@melodify/web build
-          # Copy the build into cloudflare/public so the Worker's assets
-          # binding ships the freshly-rendered SPA.
-          rm -rf cloudflare/public
-          mkdir -p cloudflare/public
-          cp -R apps/web/dist/. cloudflare/public/
-          # Preserve the icon (the Vite build references /Icon.png at root).
-          if [[ -f apps/web/public/Icon.png ]]; then
-            cp apps/web/public/Icon.png cloudflare/public/Icon.png
+          if [[ $status -eq 0 ]]; then
+            echo "Verified repository variable API access for SRUTHI_ACTIVE_D1_SLOT."
+          elif grep -q "404" /tmp/slot-var.err; then
+            echo "SRUTHI_ACTIVE_D1_SLOT does not exist yet; workflow will create it after a successful deploy."
+          else
+            echo "::error::GH_VARIABLES_TOKEN does not have the required repository variables access."
+            cat /tmp/slot-var.err
+            exit 1
           fi
 
-      - name: Resolve active/inactive slots
-        id: slots
+      - name: Render deployment Wrangler config
         run: |
           set -euo pipefail
-          eval "$(python cloudflare/scripts/prepare_release.py --emit-env)"
-          {
-            echo "active_slot=$ACTIVE_SLOT"
-            echo "active_db_id=$ACTIVE_DB_ID"
-            echo "active_db_name=$ACTIVE_DB_NAME"
-            echo "inactive_slot=$INACTIVE_SLOT"
-            echo "inactive_db_id=$INACTIVE_DB_ID"
-            echo "inactive_db_name=$INACTIVE_DB_NAME"
-          } >> "$GITHUB_OUTPUT"
-          echo "Will write into INACTIVE slot: $INACTIVE_SLOT ($INACTIVE_DB_ID)"
-          echo "Currently live ACTIVE slot:    $ACTIVE_SLOT ($ACTIVE_DB_ID)"
-
-      - name: Render wrangler configs (inactive + post-deploy)
-        run: |
-          set -euo pipefail
-          # The single deploy config we're about to use:
+          mkdir -p "$(dirname "${GENERATED_WRANGLER_CONFIG}")"
           python cloudflare/scripts/render_wrangler_config.py \
-            --base cloudflare/wrangler.jsonc \
-            --output "$RELEASE_DIR/wrangler.deploy.jsonc" \
-            --worker-name "$WORKER_NAME" \
-            --database-id "${{ steps.slots.outputs.inactive_db_id }}" \
-            --database-name "${{ steps.slots.outputs.inactive_db_name }}"
+            --input cloudflare/wrangler.jsonc \
+            --output "${GENERATED_WRANGLER_CONFIG}" \
+            --database-id "${TARGET_DB_ID}" \
+            --database-name "${TARGET_DB_NAME}" \
+            --account-id "${CLOUDFLARE_ACCOUNT_ID}"
 
-      - name: Validate rendered wrangler config
+          if [[ ! -f "${GENERATED_WRANGLER_CONFIG}" ]]; then
+            echo "::error::Rendered Wrangler config was not created."
+            exit 1
+          fi
+
+      - name: Validate rendered deployment config
         run: |
           set -euo pipefail
-          python cloudflare/scripts/validate_wrangler_config.py \
-            --require-database-id "$RELEASE_DIR/wrangler.deploy.jsonc"
+          python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
 
-      - name: Apply schema to inactive D1 slot
-        working-directory: cloudflare
+          config_path = Path(os.environ["GENERATED_WRANGLER_CONFIG"])
+          payload = json.loads(config_path.read_text(encoding="utf-8"))
+
+          main_path = Path(payload.get("main", ""))
+          assets_dir = Path((payload.get("assets") or {}).get("directory", ""))
+          d1_databases = payload.get("d1_databases") or []
+
+          if not main_path.is_file():
+            raise SystemExit(f"Rendered Wrangler main entry is invalid: {main_path}")
+          if not assets_dir.is_dir():
+            raise SystemExit(f"Rendered Wrangler assets directory is invalid: {assets_dir}")
+          if not d1_databases:
+            raise SystemExit("Rendered Wrangler config has no d1_databases entry.")
+          database = d1_databases[0]
+          if not database.get("database_id") or not database.get("database_name"):
+            raise SystemExit("Rendered Wrangler config is missing D1 database_id or database_name.")
+
+          print({
+            "main": str(main_path),
+            "assets": str(assets_dir),
+            "database_name": database["database_name"],
+            "database_id": database["database_id"],
+          })
+          PY
+
+      - name: Refresh catalog from MassTamilan
         run: |
           set -euo pipefail
-          npx --yes wrangler@4 d1 execute "${{ steps.slots.outputs.inactive_db_name }}" \
-            --remote --yes \
-            --config "${{ github.workspace }}/$RELEASE_DIR/wrangler.deploy.jsonc" \
-            --file data/schema.sql
+          workers="$(python - <<'PY'
+          import os
+          print(max(4, os.cpu_count() or 4))
+          PY
+          )"
+          batch_size="$(( workers * 4 ))"
+          args=(--workers "${workers}" --batch-size "${batch_size}")
+          if [[ "${SRUTHI_FULL_REFRESH}" == "true" ]]; then
+            args+=(--full)
+          fi
+          python tools/masstamilan_refresh.py "${args[@]}"
 
-      - name: Import seed into inactive D1 slot
-        working-directory: cloudflare
+      - name: Validate refreshed local catalog files
         run: |
           set -euo pipefail
-          npx --yes wrangler@4 d1 execute "${{ steps.slots.outputs.inactive_db_name }}" \
-            --remote --yes \
-            --config "${{ github.workspace }}/$RELEASE_DIR/wrangler.deploy.jsonc" \
-            --file data/seed.sql
+          if [[ ! -f data/sruthi.db ]]; then
+            echo "::error::Expected data/sruthi.db to exist after refresh."
+            exit 1
+          fi
+          if [[ ! -s data/sruthi.db ]]; then
+            echo "::error::data/sruthi.db exists but is empty."
+            exit 1
+          fi
 
-      - name: Validate inactive D1 (counts + URL coverage)
-        run: |
-          set -euo pipefail
-          python cloudflare/scripts/validate_release.py \
-            --mode d1 \
-            --database-name "${{ steps.slots.outputs.inactive_db_name }}" \
-            --config "$RELEASE_DIR/wrangler.deploy.jsonc"
-
-      - name: Deploy Worker bound to inactive slot
-        working-directory: cloudflare
-        run: |
-          set -euo pipefail
-          npx --yes wrangler@4 deploy \
-            --config "${{ github.workspace }}/$RELEASE_DIR/wrangler.deploy.jsonc"
-
-      - name: HTTP smoke-test the deployed Worker
-        if: env.WORKER_PUBLIC_URL != ''
-        run: |
-          set -euo pipefail
-          # Allow the deploy a few seconds to propagate before hitting it.
-          sleep 5
-          python cloudflare/scripts/validate_release.py \
-            --mode http \
-            --url "$WORKER_PUBLIC_URL"
-
-      - name: Promote — flip active slot marker
+      - name: Validate catalog and build release seed
         run: |
           set -euo pipefail
           python cloudflare/scripts/prepare_release.py \
-            --promote --deployment-id "${{ github.run_id }}"
+            --db data/sruthi.db \
+            --seed cloudflare/data/seed.sql \
+            --baseline cloudflare/data/release-baseline.json \
+            --manifest "${RELEASE_MANIFEST}" \
+            --duckdb-path "${RELEASE_DUCKDB}"
 
-      - name: Commit updated active-slot marker
-        run: |
-          set -euo pipefail
-          if git diff --quiet -- .release/active-slot.json; then
-            echo "Marker unchanged; skipping commit."
-            exit 0
+          if [[ ! -f cloudflare/data/seed.sql ]]; then
+            echo "::error::Release seed was not generated."
+            exit 1
           fi
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add .release/active-slot.json
-          git commit -m "chore(release): promote slot to ${{ steps.slots.outputs.inactive_slot }} (run ${{ github.run_id }})"
-          # Refuse force-push; only a fast-forward push back to main is OK.
-          git push origin HEAD:main
+          if [[ ! -s cloudflare/data/seed.sql ]]; then
+            echo "::error::Release seed was generated but is empty."
+            exit 1
+          fi
+          if [[ ! -f "${RELEASE_MANIFEST}" ]]; then
+            echo "::error::Release manifest was not generated."
+            exit 1
+          fi
 
-      - name: Upload diagnostics on failure
-        if: failure()
+      - name: Upload build artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: refresh-diagnostics-${{ github.run_id }}
-          if-no-files-found: ignore
-          retention-days: 7
+          name: sruthi-release
+          if-no-files-found: error
           path: |
-            ${{ env.RELEASE_DIR }}/refresh-report.json
-            ${{ env.RELEASE_DIR }}/wrangler.deploy.jsonc
-            ${{ env.RELEASE_DIR }}/refreshed.sqlite3
-            cloudflare/data/schema.sql
             cloudflare/data/seed.sql
+            ${{ env.RELEASE_MANIFEST }}
+
+      - name: Import release into inactive D1 slot
+        run: |
+          set -euo pipefail
+          npx wrangler d1 execute "${TARGET_DB_NAME}" \
+            --remote \
+            --file cloudflare/data/seed.sql \
+            --config "${GENERATED_WRANGLER_CONFIG}"
+
+      - name: Validate inactive D1 slot
+        run: |
+          set -euo pipefail
+          npx wrangler d1 execute "${TARGET_DB_NAME}" \
+            --remote \
+            --command "SELECT COUNT(*) AS count FROM albums;" \
+            --config "${GENERATED_WRANGLER_CONFIG}" \
+            --json > /tmp/albums.json
+          npx wrangler d1 execute "${TARGET_DB_NAME}" \
+            --remote \
+            --command "SELECT COUNT(*) AS count FROM songs;" \
+            --config "${GENERATED_WRANGLER_CONFIG}" \
+            --json > /tmp/songs.json
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          def extract_count(path):
+            payload = json.loads(Path(path).read_text())
+            stack = [payload]
+            while stack:
+              item = stack.pop()
+              if isinstance(item, dict):
+                if "count" in item:
+                  return int(item["count"])
+                stack.extend(item.values())
+              elif isinstance(item, list):
+                stack.extend(item)
+            raise SystemExit(f"No count field found in {path}")
+
+          album_count = extract_count("/tmp/albums.json")
+          song_count = extract_count("/tmp/songs.json")
+          if album_count <= 0 or song_count <= 0:
+            raise SystemExit(f"Remote D1 validation failed: albums={album_count}, songs={song_count}")
+          print({"albumCount": album_count, "songCount": song_count})
+          PY
+
+      - name: Deploy Worker after successful import and validation
+        run: |
+          set -euo pipefail
+          npx wrangler deploy --config "${GENERATED_WRANGLER_CONFIG}"
+
+      - name: Mark deployed D1 slot as active
+        env:
+          GH_TOKEN: ${{ secrets.GH_VARIABLES_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          if [[ -z "${GH_TOKEN:-}" ]]; then
+            echo "::error::Missing required secret GH_VARIABLES_TOKEN. Cannot mark the active D1 slot."
+            exit 1
+          fi
+
+          if [[ "${TARGET_SLOT}" != "A" && "${TARGET_SLOT}" != "B" ]]; then
+            echo "::error::Refusing to write invalid TARGET_SLOT '${TARGET_SLOT}'. Expected A or B."
+            exit 1
+          fi
+
+          echo "Updating SRUTHI_ACTIVE_D1_SLOT to '${TARGET_SLOT}'."
+
+          set +e
+          gh api \
+            --method PATCH \
+            "repos/${GITHUB_REPOSITORY}/actions/variables/SRUTHI_ACTIVE_D1_SLOT" \
+            -f name=SRUTHI_ACTIVE_D1_SLOT \
+            -f value="${TARGET_SLOT}" >/tmp/slot-patch.out 2>/tmp/slot-patch.err
+          patch_status=$?
+          set -e
+
+          if [[ $patch_status -eq 0 ]]; then
+            echo "Updated SRUTHI_ACTIVE_D1_SLOT successfully."
+            exit 0
+          fi
+
+          if grep -q "404" /tmp/slot-patch.err; then
+            echo "SRUTHI_ACTIVE_D1_SLOT does not exist yet. Creating it now."
+            gh api \
+              --method POST \
+              "repos/${GITHUB_REPOSITORY}/actions/variables" \
+              -f name=SRUTHI_ACTIVE_D1_SLOT \
+              -f value="${TARGET_SLOT}" >/tmp/slot-create.out 2>/tmp/slot-create.err
+            echo "Created SRUTHI_ACTIVE_D1_SLOT successfully."
+            exit 0
+          fi
+
+          echo "::error::Failed to update SRUTHI_ACTIVE_D1_SLOT."
+          cat /tmp/slot-patch.err
+          exit 1

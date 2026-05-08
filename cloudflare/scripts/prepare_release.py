@@ -1,22 +1,26 @@
 #!/usr/bin/env python3
 """
-Read .release/active-slot.json (the slot-state marker) and emit shell-style
-key=value lines describing which slot we should write to next.
+Validate the post-refresh SQLite catalogue against a baseline floor, generate
+the D1 seed file, optionally cross-check counts via DuckDB, and write a
+release manifest. Used by the background-refresh GitHub Actions workflow.
 
-The workflow does:
-    eval "$(python cloudflare/scripts/prepare_release.py --emit-env)"
-…to populate INACTIVE_SLOT, INACTIVE_DB_ID, INACTIVE_DB_NAME, ACTIVE_SLOT,
-ACTIVE_DB_ID, ACTIVE_DB_NAME for the rest of the workflow steps.
+Usage (matches .github/workflows/background-refresh.yml):
 
-Slot bookkeeping:
-    .release/active-slot.json holds the *currently live* slot identifier.
-    The "inactive" slot is whichever one isn't live. This script reads the
-    file, looks up the matching env var for the inactive slot's database id
-    (CLOUDFLARE_D1_<SLOT>_DATABASE_ID — uppercased) and emits the next-state
-    plan.
+    python cloudflare/scripts/prepare_release.py \\
+        --db data/sruthi.db \\
+        --seed cloudflare/data/seed.sql \\
+        --baseline cloudflare/data/release-baseline.json \\
+        --manifest cloudflare/.generated/release-manifest.json \\
+        --duckdb-path cloudflare/.generated/release-check.duckdb
 
-When promoting (after a successful deploy), use --promote to write the
-updated marker file flipping the active/inactive labels.
+Exit codes:
+    0 — release is healthy and seed/manifest were written
+    1 — release is unsafe (counts below baseline, missing URLs, etc.)
+    2 — configuration / I/O error before any validation could run
+
+The script reads the floors from `release-baseline.json`. Tune that file to
+match the upstream catalogue size — the workflow refuses to deploy any
+refresh that produced fewer rows than these floors.
 """
 
 from __future__ import annotations
@@ -25,101 +29,220 @@ import argparse
 import datetime
 import json
 import os
+import sqlite3
+import subprocess
 import sys
 from pathlib import Path
 
-DEFAULT_MARKER = Path(".release/active-slot.json")
-DEFAULT_SLOTS = ("primary", "secondary")
+REPO_ROOT = Path(__file__).resolve().parents[2]
+EXPORT_SCRIPT = REPO_ROOT / "cloudflare/scripts/export_d1_sql.py"
 
 
-def env_var_for_slot(slot: str) -> str:
-    return f"CLOUDFLARE_D1_{slot.upper()}_DATABASE_ID"
+def fail_config(message: str) -> int:
+    print(f"::error::{message}", file=sys.stderr)
+    return 2
 
 
-def load_marker(path: Path) -> dict:
-    if not path.exists():
-        # Bootstrap default: "primary" is live, secondary is the inactive one
-        # that the next refresh will write to.
-        return {
-            "active": DEFAULT_SLOTS[0],
-            "inactive": DEFAULT_SLOTS[1],
-            "updated_at": None,
-            "deployment_id": None,
-        }
-    return json.loads(path.read_text(encoding="utf-8"))
+def fail_validation(messages: list[str]) -> int:
+    print("::error::Release validation failed:", file=sys.stderr)
+    for line in messages:
+        print(f"  - {line}", file=sys.stderr)
+    return 1
 
 
-def shell_quote(value: str) -> str:
-    # Single-quote and escape any embedded single quote.
-    return "'" + value.replace("'", "'\\''") + "'"
+def read_counts(db_path: Path) -> dict[str, int]:
+    conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    try:
+        albums = conn.execute("SELECT COUNT(*) FROM albums").fetchone()[0]
+        songs = conn.execute("SELECT COUNT(*) FROM songs").fetchone()[0]
+        with_url = conn.execute(
+            "SELECT COUNT(*) FROM songs "
+            "WHERE coalesce(url_320kbps,'') != '' OR coalesce(url_128kbps,'') != ''"
+        ).fetchone()[0]
+        return {"albums": int(albums), "songs": int(songs), "songs_with_url": int(with_url)}
+    finally:
+        conn.close()
 
 
-def emit_env(state: dict, slots: tuple[str, ...]) -> int:
-    active = state.get("active") or slots[0]
-    inactive = state.get("inactive") or (slots[1] if active == slots[0] else slots[0])
+def check_named_entries(db_path: Path, baseline: dict) -> list[str]:
+    """Optional sanity: confirm a few specific titles still resolve.
 
-    active_id = os.environ.get(env_var_for_slot(active), "").strip()
-    inactive_id = os.environ.get(env_var_for_slot(inactive), "").strip()
-    if not active_id:
-        print(f"error: env var {env_var_for_slot(active)} is empty", file=sys.stderr)
-        return 2
-    if not inactive_id:
-        print(f"error: env var {env_var_for_slot(inactive)} is empty", file=sys.stderr)
-        return 2
-    if active_id == inactive_id:
-        print("error: active and inactive slots resolve to the same database id",
-              file=sys.stderr)
-        return 2
-
-    base_name = os.environ.get("WRANGLER_DATABASE_BASENAME", "sruthi-catalog")
-
-    pairs = [
-        ("ACTIVE_SLOT", active),
-        ("ACTIVE_DB_ID", active_id),
-        ("ACTIVE_DB_NAME", f"{base_name}-{active}"),
-        ("INACTIVE_SLOT", inactive),
-        ("INACTIVE_DB_ID", inactive_id),
-        ("INACTIVE_DB_NAME", f"{base_name}-{inactive}"),
-    ]
-    for key, value in pairs:
-        print(f"export {key}={shell_quote(value)}")
-    return 0
+    Tunes via `checked_albums` / `checked_tracks` arrays in the baseline.
+    Used to catch the "scraper succeeded but the table is somehow empty for
+    every song you actually care about" failure mode.
+    """
+    problems: list[str] = []
+    conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    try:
+        for album in baseline.get("checked_albums", []) or []:
+            row = conn.execute(
+                "SELECT 1 FROM albums WHERE lower(album_name) LIKE ? LIMIT 1",
+                [f"%{album.lower()}%"],
+            ).fetchone()
+            if row is None:
+                problems.append(f"missing checked album: {album!r}")
+        for track in baseline.get("checked_tracks", []) or []:
+            row = conn.execute(
+                "SELECT 1 FROM songs WHERE lower(track_name) LIKE ? LIMIT 1",
+                [f"%{track.lower()}%"],
+            ).fetchone()
+            if row is None:
+                problems.append(f"missing checked track: {track!r}")
+    finally:
+        conn.close()
+    return problems
 
 
-def promote(marker_path: Path, deployment_id: str | None) -> int:
-    state = load_marker(marker_path)
-    new_active = state.get("inactive") or DEFAULT_SLOTS[1]
-    new_inactive = state.get("active") or DEFAULT_SLOTS[0]
-    next_state = {
-        "active": new_active,
-        "inactive": new_inactive,
-        "updated_at": datetime.datetime.now(datetime.UTC).replace(microsecond=0).isoformat(),
-        "deployment_id": deployment_id,
-    }
-    marker_path.parent.mkdir(parents=True, exist_ok=True)
-    marker_path.write_text(json.dumps(next_state, indent=2) + "\n", encoding="utf-8")
-    print(f"promoted: active={new_active}, inactive={new_inactive}")
-    return 0
+def duckdb_cross_check(sqlite_path: Path, duckdb_path: Path, expected: dict[str, int]) -> str | None:
+    """Use DuckDB to re-count from the SQLite. Returns an error message or None."""
+    try:
+        import duckdb  # type: ignore[import-untyped]
+    except ImportError:
+        return "duckdb is not installed in this environment"
+
+    duckdb_path.parent.mkdir(parents=True, exist_ok=True)
+    if duckdb_path.exists():
+        duckdb_path.unlink()
+    con = duckdb.connect(str(duckdb_path))
+    try:
+        try:
+            con.execute("INSTALL sqlite_scanner;")
+        except duckdb.Error:
+            pass
+        con.execute("LOAD sqlite_scanner;")
+        con.execute(f"ATTACH '{sqlite_path}' AS source (TYPE sqlite, READ_ONLY);")
+        duck_albums = con.execute("SELECT COUNT(*) FROM source.albums").fetchone()[0]
+        duck_songs = con.execute("SELECT COUNT(*) FROM source.songs").fetchone()[0]
+    finally:
+        con.close()
+    if duck_albums != expected["albums"]:
+        return f"DuckDB album count {duck_albums} != sqlite {expected['albums']}"
+    if duck_songs != expected["songs"]:
+        return f"DuckDB song count {duck_songs} != sqlite {expected['songs']}"
+    return None
 
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--marker", type=Path, default=DEFAULT_MARKER)
-    parser.add_argument("--emit-env", action="store_true",
-                        help="Print export lines for the next refresh")
-    parser.add_argument("--promote", action="store_true",
-                        help="Flip the marker file so the previous inactive slot is now active")
-    parser.add_argument("--deployment-id", default=os.environ.get("GITHUB_RUN_ID", ""))
+    parser.add_argument("--db", required=True, type=Path,
+                        help="Refreshed SQLite catalogue (e.g. data/sruthi.db)")
+    parser.add_argument("--seed", required=True, type=Path,
+                        help="Output path for the generated D1 seed SQL")
+    parser.add_argument("--baseline", required=True, type=Path,
+                        help="JSON file with min_albums / min_songs / etc.")
+    parser.add_argument("--manifest", required=True, type=Path,
+                        help="Output JSON manifest summarising the release")
+    parser.add_argument("--duckdb-path", type=Path, default=None,
+                        help="Optional DuckDB file used to cross-check counts")
     args = parser.parse_args()
 
-    if args.emit_env == args.promote:
-        print("error: pass exactly one of --emit-env or --promote", file=sys.stderr)
-        return 2
+    if not args.db.exists():
+        return fail_config(f"sqlite catalogue not found: {args.db}")
+    if args.db.stat().st_size == 0:
+        return fail_config(f"sqlite catalogue is empty: {args.db}")
+    if not args.baseline.exists():
+        return fail_config(f"baseline not found: {args.baseline}")
+    if not EXPORT_SCRIPT.exists():
+        return fail_config(f"export script missing: {EXPORT_SCRIPT}")
 
-    state = load_marker(args.marker)
-    if args.promote:
-        return promote(args.marker, args.deployment_id or None)
-    return emit_env(state, DEFAULT_SLOTS)
+    try:
+        baseline = json.loads(args.baseline.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        return fail_config(f"baseline is not valid JSON: {exc}")
+
+    min_albums = int(baseline.get("min_albums", 0))
+    min_songs = int(baseline.get("min_songs", 0))
+    min_url_coverage = float(baseline.get("min_url_coverage", 0.95))
+    max_seed_age_seconds = int(baseline.get("max_seed_age_seconds", 0) or 0)
+
+    try:
+        counts = read_counts(args.db)
+    except sqlite3.Error as exc:
+        return fail_config(f"could not read sqlite catalogue: {exc}")
+
+    coverage = (counts["songs_with_url"] / counts["songs"]) if counts["songs"] else 0.0
+    print("Catalogue stats")
+    print(f"  albums         = {counts['albums']:,}  (floor {min_albums:,})")
+    print(f"  songs          = {counts['songs']:,}  (floor {min_songs:,})")
+    print(f"  songs_with_url = {counts['songs_with_url']:,}  ({coverage:.3f}, floor {min_url_coverage:.3f})")
+
+    failures: list[str] = []
+    if counts["albums"] < min_albums:
+        failures.append(
+            f"album count {counts['albums']:,} < baseline floor {min_albums:,}"
+        )
+    if counts["songs"] < min_songs:
+        failures.append(
+            f"song count {counts['songs']:,} < baseline floor {min_songs:,}"
+        )
+    if counts["songs"] > 0 and coverage < min_url_coverage:
+        failures.append(
+            f"URL coverage {coverage:.3f} < baseline floor {min_url_coverage:.3f}"
+        )
+    failures.extend(check_named_entries(args.db, baseline))
+
+    if failures:
+        return fail_validation(failures)
+
+    # Generate the D1 seed via the existing export script (subprocess so we
+    # don't import-link the two scripts; keeps each independently runnable).
+    args.seed.parent.mkdir(parents=True, exist_ok=True)
+    print(f"Generating seed: {args.seed}")
+    completed = subprocess.run(
+        [
+            sys.executable,
+            str(EXPORT_SCRIPT),
+            "--db", str(args.db),
+            "--out", str(args.seed),
+        ],
+        check=False,
+    )
+    if completed.returncode != 0:
+        return fail_config(
+            f"export_d1_sql.py exited with status {completed.returncode}"
+        )
+    if not args.seed.exists() or args.seed.stat().st_size == 0:
+        return fail_config(f"export produced no usable seed at {args.seed}")
+
+    duckdb_error: str | None = None
+    if args.duckdb_path:
+        duckdb_error = duckdb_cross_check(args.db, args.duckdb_path, counts)
+        if duckdb_error:
+            # Cross-check disagreement is treated as a hard failure; that's
+            # the whole point of running it.
+            return fail_validation([f"DuckDB cross-check: {duckdb_error}"])
+
+    if max_seed_age_seconds:
+        now = datetime.datetime.now(datetime.UTC).timestamp()
+        seed_mtime = args.seed.stat().st_mtime
+        age = now - seed_mtime
+        if age > max_seed_age_seconds:
+            return fail_validation(
+                [f"seed.sql is older than {max_seed_age_seconds}s ({age:.0f}s)"]
+            )
+
+    args.manifest.parent.mkdir(parents=True, exist_ok=True)
+    manifest = {
+        "generated_at": datetime.datetime.now(datetime.UTC).replace(microsecond=0).isoformat(),
+        "deployment_id": os.environ.get("GITHUB_RUN_ID") or None,
+        "git_sha": os.environ.get("GITHUB_SHA") or None,
+        "db_path": str(args.db),
+        "seed_path": str(args.seed),
+        "seed_size_bytes": args.seed.stat().st_size,
+        "counts": counts,
+        "url_coverage": coverage,
+        "baseline_floors": {
+            "min_albums": min_albums,
+            "min_songs": min_songs,
+            "min_url_coverage": min_url_coverage,
+        },
+        "duckdb_path": str(args.duckdb_path) if args.duckdb_path else None,
+        "duckdb_cross_check": "skipped" if duckdb_error is None and not args.duckdb_path else "ok",
+    }
+    args.manifest.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+    print(f"manifest written: {args.manifest}")
+    print("OK — release prepared")
+    return 0
 
 
 if __name__ == "__main__":

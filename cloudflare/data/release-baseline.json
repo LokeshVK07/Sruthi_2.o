@@ -1,0 +1,16 @@
+{
+  "_comment": "Floors used by cloudflare/scripts/prepare_release.py. The background-refresh workflow refuses to deploy a refresh that produces fewer rows than these counts (which is how a fully challenged scrape looks). Tune them up after a deliberate catalogue growth, never down.",
+
+  "min_albums": 4500,
+  "min_songs": 26000,
+  "min_url_coverage": 0.95,
+
+  "checked_albums": [
+    "Love Insurance Kompany",
+    "Pavazha Malli"
+  ],
+  "checked_tracks": [
+    "Pavazha Malli",
+    "Pattuma"
+  ]
+}

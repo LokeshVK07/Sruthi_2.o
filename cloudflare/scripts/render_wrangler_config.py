@@ -52,11 +52,14 @@ def absolutise(path_str: str, base_dir: Path) -> str:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Render a wrangler config with overrides")
-    parser.add_argument("--base", default="cloudflare/wrangler.jsonc")
+    # `--base` is the historical flag; `--input` is the alias used by the
+    # background-refresh workflow. They're interchangeable.
+    parser.add_argument("--base", "--input", dest="base", default="cloudflare/wrangler.jsonc")
     parser.add_argument("--output", required=True, help="Where to write the rendered config")
     parser.add_argument("--database-id", help="Override d1_databases[0].database_id")
     parser.add_argument("--database-name", help="Override d1_databases[0].database_name")
     parser.add_argument("--worker-name", help="Override the Worker name (top-level `name`)")
+    parser.add_argument("--account-id", help="Set top-level account_id (CI uses this so wrangler doesn't prompt)")
     parser.add_argument("--main", help="Override `main` (defaults to absolute version of base)")
     parser.add_argument("--assets-directory", help="Override assets.directory")
     args = parser.parse_args()
@@ -83,6 +86,9 @@ def main() -> int:
 
     if args.worker_name:
         config["name"] = args.worker_name
+
+    if args.account_id:
+        config["account_id"] = args.account_id
 
     if args.database_id or args.database_name:
         if not config.get("d1_databases"):

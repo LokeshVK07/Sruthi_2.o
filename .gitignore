@@ -34,5 +34,12 @@ cloudflare/node_modules
 cloudflare/.wrangler
 cloudflare/scripts/__pycache__/
 
-# CI release scratch dirs (per-run; the marker file under .release/ stays)
+# Per-run scratch from CI (Wrangler config, manifests, DuckDB stats)
+cloudflare/.generated/
+
+# CI release scratch dirs (per-run)
 .release/work-*
+
+# Refreshed catalogue produced by tools/masstamilan_refresh.py
+data/sruthi.db
+data/sruthi.db-*
