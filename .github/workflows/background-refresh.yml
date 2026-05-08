@@ -57,8 +57,18 @@ jobs:
 
       - name: Install workflow dependencies
         run: |
+          set -euo pipefail
           python -m pip install --upgrade pip
-          python -m pip install duckdb requests beautifulsoup4 cloudscraper
+          # The scraper (apps/api/app/scripts/refresh_catalog.py) imports
+          # pydantic, fastapi, httpx, lxml, tenacity, curl_cffi, etc. via
+          # apps/api/app — install the canonical requirements file so every
+          # transitive import resolves. duckdb is also listed there, plus
+          # `requests` is added explicitly because tools/ scripts use it but
+          # it isn't in requirements.txt.
+          python -m pip install -r apps/api/requirements.txt requests
+          # Skip Playwright's browser download — CI doesn't run the headless
+          # Chrome fallback, and the binary is ~150 MB.
+          export PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1
           npm install --global wrangler@4.81.1
 
       - name: Validate workflow configuration
