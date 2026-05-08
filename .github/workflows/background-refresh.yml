@@ -56,19 +56,42 @@ jobs:
           node-version: "20"
 
       - name: Install workflow dependencies
+        env:
+          # Skip Playwright's browser download — CI doesn't run the headless
+          # Chrome fallback, and the binary is ~150 MB.
+          PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: "1"
         run: |
           set -euo pipefail
           python -m pip install --upgrade pip
           # The scraper (apps/api/app/scripts/refresh_catalog.py) imports
           # pydantic, fastapi, httpx, lxml, tenacity, curl_cffi, etc. via
           # apps/api/app — install the canonical requirements file so every
-          # transitive import resolves. duckdb is also listed there, plus
-          # `requests` is added explicitly because tools/ scripts use it but
-          # it isn't in requirements.txt.
+          # transitive import resolves. We also pin `requests`, which a few
+          # tools/ helpers use but isn't in apps/api/requirements.txt.
           python -m pip install -r apps/api/requirements.txt requests
-          # Skip Playwright's browser download — CI doesn't run the headless
-          # Chrome fallback, and the binary is ~150 MB.
-          export PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1
+          # Belt-and-suspenders: import every module the scrape transitively
+          # needs *now*, while we still have a clean error message. If
+          # something went wrong with the resolver we'd rather fail at this
+          # step than produce a confusing ModuleNotFoundError later.
+          python - <<'PY'
+          import importlib, sys
+          required = [
+              "pydantic", "fastapi", "httpx", "lxml", "tenacity",
+              "curl_cffi", "duckdb", "cloudscraper", "bs4", "requests",
+          ]
+          missing = []
+          for name in required:
+              try:
+                  importlib.import_module(name)
+              except Exception as exc:
+                  missing.append(f"{name} ({exc})")
+          if missing:
+              sys.stderr.write("Missing/broken imports after pip install:\n")
+              for line in missing:
+                  sys.stderr.write(f"  - {line}\n")
+              raise SystemExit(1)
+          print("All required Python modules import cleanly.")
+          PY
           npm install --global wrangler@4.81.1
 
       - name: Validate workflow configuration
