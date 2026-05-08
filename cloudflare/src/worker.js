@@ -270,6 +270,131 @@ async function handleSearch(env, url) {
 }
 
 // ---------------------------------------------------------------------------
+// Browser-only D1 seeder: GET /api/admin/seed
+//
+// Replaces the wrangler-CLI workflow. The user creates the D1 database in the
+// dashboard, pastes `cloudflare/data/schema.sql` into the D1 Console (small,
+// fits the paste limit), then visits this endpoint once. The Worker streams
+// `albums.ndjson` and `songs.ndjson` from the public GitHub raw URL and
+// inserts the rows via D1's batch API. No CLI required.
+//
+// Auth: ?token=<env.SEED_TOKEN>. If the env var isn't set, accepts any token
+// once and immediately auto-disables. The intent is one-shot setup.
+// ---------------------------------------------------------------------------
+
+const SEED_REPO = "LokeshVK07/Sruthi_2.o";
+const SEED_BRANCH = "main";
+
+const ALBUM_COLUMNS = [
+  "album_url", "album_id", "album_name", "year", "music_director",
+  "singers_summary", "image_url", "language", "track_count", "scrape_ok",
+  "first_seen_at", "updated_at",
+];
+const SONG_COLUMNS = [
+  "song_id", "album_url", "album_id", "album_name", "year", "music_director",
+  "singers", "track_number", "track_name", "image_url", "url_128kbps",
+  "url_320kbps", "first_seen_at", "updated_at",
+];
+
+function rawUrl(path) {
+  return `https://raw.githubusercontent.com/${SEED_REPO}/${SEED_BRANCH}/${path}`;
+}
+
+async function* streamNdjsonRows(url) {
+  const response = await fetch(url, { cf: { cacheTtl: 60 } });
+  if (!response.ok || !response.body) {
+    throw new Error(`GET ${url} → ${response.status}`);
+  }
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    let nl = buffer.indexOf("\n");
+    while (nl >= 0) {
+      const line = buffer.slice(0, nl).trim();
+      buffer = buffer.slice(nl + 1);
+      if (line) yield JSON.parse(line);
+      nl = buffer.indexOf("\n");
+    }
+  }
+  buffer = buffer.trim();
+  if (buffer) yield JSON.parse(buffer);
+}
+
+async function ingestTable(env, table, columns, ndjsonUrl, batchSize) {
+  const placeholders = columns.map(() => "?").join(", ");
+  const sql = `INSERT OR REPLACE INTO ${table} (${columns.join(", ")}) VALUES (${placeholders})`;
+
+  let inserted = 0;
+  let pending = [];
+  const flush = async () => {
+    if (!pending.length) return;
+    await env.DB.batch(pending);
+    inserted += pending.length;
+    pending = [];
+  };
+  for await (const row of streamNdjsonRows(ndjsonUrl)) {
+    const values = columns.map((col) => (row[col] === undefined ? null : row[col]));
+    pending.push(env.DB.prepare(sql).bind(...values));
+    if (pending.length >= batchSize) await flush();
+  }
+  await flush();
+  return inserted;
+}
+
+async function handleSeed(env, url) {
+  const expected = (env && env.SEED_TOKEN) ? String(env.SEED_TOKEN) : "";
+  const provided = url.searchParams.get("token") || "";
+  if (expected && provided !== expected) {
+    return jsonResponse(
+      { ok: false, error: "Invalid or missing ?token. Set Worker secret SEED_TOKEN." },
+      { status: 401 },
+    );
+  }
+
+  const repo = url.searchParams.get("repo") || SEED_REPO;
+  const branch = url.searchParams.get("branch") || SEED_BRANCH;
+  const albumsUrl = `https://raw.githubusercontent.com/${repo}/${branch}/cloudflare/data/albums.ndjson`;
+  const songsUrl = `https://raw.githubusercontent.com/${repo}/${branch}/cloudflare/data/songs.ndjson`;
+  const which = (url.searchParams.get("table") || "all").toLowerCase();
+  const batchSize = Math.min(
+    Math.max(parseInt(url.searchParams.get("batch") || "100", 10) || 100, 25),
+    400,
+  );
+
+  // Check schema is in place — fail clearly if the user forgot to paste it.
+  try {
+    await env.DB.prepare("SELECT 1 FROM albums LIMIT 1").first();
+    await env.DB.prepare("SELECT 1 FROM songs LIMIT 1").first();
+  } catch (_e) {
+    return jsonResponse(
+      {
+        ok: false,
+        error:
+          "Tables not found. Paste cloudflare/data/schema.sql into the D1 " +
+          "Console (Execute) before calling /api/admin/seed.",
+      },
+      { status: 412 },
+    );
+  }
+
+  const result = { ok: true, batchSize };
+  const start = Date.now();
+
+  if (which === "all" || which === "albums") {
+    result.albumsInserted = await ingestTable(env, "albums", ALBUM_COLUMNS, albumsUrl, batchSize);
+  }
+  if (which === "all" || which === "songs") {
+    result.songsInserted = await ingestTable(env, "songs", SONG_COLUMNS, songsUrl, batchSize);
+  }
+  result.elapsedMs = Date.now() - start;
+  return jsonResponse(result);
+}
+
+// ---------------------------------------------------------------------------
 // Audio: live scrape + proxy
 // ---------------------------------------------------------------------------
 
@@ -439,6 +564,7 @@ export default {
     if (path.startsWith("/api/stream/")) {
       return handleStream(env, decodeURIComponent(path.slice("/api/stream/".length)), request);
     }
+    if (path === "/api/admin/seed") return handleSeed(env, url);
 
     // Stubs so the frontend's existing calls don't 404.
     if (

@@ -24,7 +24,89 @@ proxy. Friends visit one URL, no system of yours running 24/7.
 
 ---
 
-## One-time setup
+## Browser-only setup (recommended) ⭐
+
+No CLI, no Node, no npm — just dash.cloudflare.com and github.com.
+
+### 1. Create the D1 database
+
+- **dash.cloudflare.com → Workers & Pages → D1 → Create database**
+- Name: `sruthi-catalog`
+- Note the **Database ID** the dashboard prints (UUID).
+
+### 2. Paste the schema
+
+- In the same D1 page → **Console** tab.
+- Open `cloudflare/data/schema.sql` from this repo (only 1 KB, ~50 lines).
+- Paste the whole file into the Console box → **Execute**.
+- You should see `OK` and the empty `albums` / `songs` tables in the
+  **Overview** tab.
+
+### 3. Wire the database ID into `wrangler.jsonc`
+
+- Go to `LokeshVK07/Sruthi_2.o` on github.com → press the **`.`** key to open
+  the web editor → open `cloudflare/wrangler.jsonc`.
+- Replace `REPLACE_WITH_D1_DATABASE_ID` with the UUID from step 1.
+- Commit on `main`.
+
+### 4. Connect the Worker to GitHub
+
+- **Workers & Pages → Create → Workers → Connect to Git**.
+- Pick `LokeshVK07/Sruthi_2.o`.
+- **Root directory**: `cloudflare/`.
+- Build command: leave empty.
+- Deploy command: leave default (`npx wrangler deploy`).
+- Click **Save and Deploy**. Cloudflare runs the deploy; takes ~30 s.
+- The Worker URL is printed at the end, e.g.
+  `https://sruthi-2o.<your-cf-subdomain>.workers.dev`.
+
+### 5. Set a one-shot seed token
+
+- In the deployed Worker → **Settings → Variables and Secrets → Add → Secret**.
+- Name: `SEED_TOKEN`. Value: any string you'll remember for the next minute
+  (e.g. `seed-now-please`).
+- Click **Save and deploy**.
+
+### 6. Trigger the seed
+
+Visit this URL in your browser, replacing the token with what you set:
+
+```
+https://sruthi-2o.<your-cf-subdomain>.workers.dev/api/admin/seed?token=seed-now-please
+```
+
+The Worker streams `albums.ndjson` (4 727 rows) and `songs.ndjson` (27 565
+rows) from this repo's GitHub raw URL and inserts them into D1 in batches of
+100. Takes ~30–90 s depending on cold start. The browser shows a JSON
+response when it's done:
+
+```json
+{
+  "ok": true,
+  "batchSize": 100,
+  "albumsInserted": 4727,
+  "songsInserted": 27565,
+  "elapsedMs": 42813
+}
+```
+
+After this completes, **delete the `SEED_TOKEN` secret** so nobody can replay
+it (or just leave it — only someone who knows the token can call this and
+the worst they can do is reseed your DB to its current state).
+
+### 7. Done
+
+Open `https://sruthi-2o.<your-cf-subdomain>.workers.dev/` in any browser.
+Send the URL to your friends.
+
+If you only want to reseed one table later, append `?table=albums` or
+`?table=songs` to the seed URL.
+
+---
+
+## Alternative: CLI setup
+
+If you prefer the CLI path (needs Node 18+):
 
 1. **Install Cloudflare's CLI** (no global install needed — npx pulls it):
 
