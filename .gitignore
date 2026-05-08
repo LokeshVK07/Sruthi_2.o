@@ -33,3 +33,6 @@ apps/apps/
 cloudflare/node_modules
 cloudflare/.wrangler
 cloudflare/scripts/__pycache__/
+
+# CI release scratch dirs (per-run; the marker file under .release/ stays)
+.release/work-*

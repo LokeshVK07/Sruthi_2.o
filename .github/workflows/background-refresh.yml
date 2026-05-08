@@ -1,0 +1,311 @@
+name: Background catalog refresh
+
+# When this runs:
+#   - Manually from the Actions tab (workflow_dispatch). The `full_refresh`
+#     input lets you opt out of the full rescrape if you only want to push
+#     the existing local catalogue out.
+#   - Automatically every Monday and Thursday at 18:30 UTC. Scheduled runs
+#     always do a full refresh.
+#
+# What it does (high level):
+#   1. Re-scrapes the catalogue (page-wise listings + movie-index discovery
+#      + per-album rescrape).
+#   2. Exports SQLite → schema.sql + seed.sql + ndjson files.
+#   3. Validates the generated data BEFORE touching Cloudflare.
+#   4. Renders a wrangler config pointed at the *inactive* D1 slot, imports
+#      schema + seed into it, validates the imported D1, then deploys the
+#      Worker bound to that inactive slot.
+#   5. Smoke-tests the live URL.
+#   6. Promotes: the previously inactive slot becomes active, marker file
+#      committed back to main.
+#
+# If anything before step 6 fails, the live Worker keeps serving the
+# previous active slot — the inactive one is the only thing we touched.
+
+on:
+  workflow_dispatch:
+    inputs:
+      full_refresh:
+        description: "Run a full re-scrape (uncheck for a fast incremental)"
+        type: boolean
+        default: true
+  schedule:
+    # 18:30 UTC Mon + Thu — early morning Tue/Fri in IST/AEST.
+    - cron: "30 18 * * 1,4"
+
+permissions:
+  # Required so the workflow can commit the updated active-slot marker back
+  # to main after a successful promotion.
+  contents: write
+
+concurrency:
+  group: background-refresh
+  cancel-in-progress: false
+
+env:
+  PYTHON_VERSION: "3.12"
+  NODE_VERSION: "20"
+  WORKER_NAME: ${{ vars.WORKER_NAME || 'sruthi-2o' }}
+  WRANGLER_DATABASE_BASENAME: ${{ vars.WRANGLER_DATABASE_BASENAME || 'sruthi-catalog' }}
+
+jobs:
+  refresh-and-deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: bash
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      CLOUDFLARE_D1_PRIMARY_DATABASE_ID: ${{ secrets.CLOUDFLARE_D1_PRIMARY_DATABASE_ID }}
+      CLOUDFLARE_D1_SECONDARY_DATABASE_ID: ${{ secrets.CLOUDFLARE_D1_SECONDARY_DATABASE_ID }}
+      WORKER_PUBLIC_URL: ${{ vars.WORKER_PUBLIC_URL }}
+      RELEASE_DIR: .release/work-${{ github.run_id }}
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          # Need full history so the auto-commit step can fast-forward push.
+          fetch-depth: 0
+
+      - name: Validate required secrets and inputs early
+        run: |
+          set -euo pipefail
+          missing=()
+          [[ -z "${CLOUDFLARE_API_TOKEN:-}" ]] && missing+=(CLOUDFLARE_API_TOKEN)
+          [[ -z "${CLOUDFLARE_ACCOUNT_ID:-}" ]] && missing+=(CLOUDFLARE_ACCOUNT_ID)
+          [[ -z "${CLOUDFLARE_D1_PRIMARY_DATABASE_ID:-}" ]] && missing+=(CLOUDFLARE_D1_PRIMARY_DATABASE_ID)
+          [[ -z "${CLOUDFLARE_D1_SECONDARY_DATABASE_ID:-}" ]] && missing+=(CLOUDFLARE_D1_SECONDARY_DATABASE_ID)
+          if (( ${#missing[@]} )); then
+            echo "::error::Missing required secrets: ${missing[*]}"
+            exit 1
+          fi
+          for f in cloudflare/wrangler.jsonc cloudflare/src/worker.js \
+                   cloudflare/scripts/export_d1_sql.py \
+                   cloudflare/scripts/render_wrangler_config.py \
+                   cloudflare/scripts/validate_wrangler_config.py \
+                   cloudflare/scripts/validate_generated_data.py \
+                   cloudflare/scripts/validate_release.py \
+                   cloudflare/scripts/prepare_release.py \
+                   apps/api/app/scripts/refresh_catalog.py \
+                   apps/api/requirements.txt \
+                   .release/active-slot.json; do
+            [[ -f "$f" ]] || { echo "::error::Required file missing: $f"; exit 1; }
+          done
+          mkdir -p "$RELEASE_DIR"
+          echo "RELEASE_DIR=$RELEASE_DIR" >> "$GITHUB_ENV"
+
+      - name: Set up Python ${{ env.PYTHON_VERSION }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: apps/api/requirements.txt
+
+      - name: Set up Node ${{ env.NODE_VERSION }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: |
+            cloudflare/package-lock.json
+            apps/web/package-lock.json
+            package-lock.json
+
+      - name: Install Python dependencies
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          pip install -r apps/api/requirements.txt
+          # Playwright is optional for the workflow (the GitHub runner has
+          # outbound IP access masstamilan accepts). Skip its browser install
+          # to save 90 s and a few hundred MB.
+
+      - name: Install Cloudflare tooling
+        working-directory: cloudflare
+        run: |
+          set -euo pipefail
+          npm ci
+
+      - name: Compute refresh mode
+        id: mode
+        run: |
+          set -euo pipefail
+          if [[ "${{ github.event_name }}" == "schedule" ]]; then
+            echo "full=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "full=${{ inputs.full_refresh }}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Run catalog refresh (full=${{ steps.mode.outputs.full }})
+        env:
+          DATABASE_PATH: ${{ github.workspace }}/apps/api/data/melodify.sqlite3
+          PYTHONPATH: ${{ github.workspace }}/apps/api
+        run: |
+          set -euo pipefail
+          mkdir -p "$RELEASE_DIR" "$(dirname "$DATABASE_PATH")"
+          report="$RELEASE_DIR/refresh-report.json"
+          echo "::group::Running refresh_catalog.py"
+          if [[ "${{ steps.mode.outputs.full }}" == "true" ]]; then
+            python -m app.scripts.refresh_catalog \
+              --full --workers 4 --batch-size 16 \
+              --report-path "$report"
+          else
+            python -m app.scripts.refresh_catalog \
+              --workers 4 --batch-size 16 \
+              --report-path "$report"
+          fi
+          echo "::endgroup::"
+          # Surface a one-line summary so the build log makes intent clear.
+          python - "$report" <<'PY'
+          import json, sys
+          report = json.load(open(sys.argv[1]))
+          summary = report["summary"]
+          print("REFRESH SUMMARY:")
+          print(f"  mode               = {report['mode']}")
+          print(f"  status             = {report['status']}")
+          print(f"  pages scanned      = {summary['listing_pages_scanned'] + summary['movie_index_pages_scanned'] + summary['section_pages_scanned'] + summary['year_pages_scanned']}")
+          print(f"  albums (add+upd)   = {summary['albums_added'] + summary['albums_updated']}")
+          print(f"  songs total        = {summary['songs_total']}")
+          if not report["success"]:
+              raise SystemExit("Refresh reported success=false")
+          PY
+
+      - name: Export SQLite → D1 seed files
+        run: |
+          set -euo pipefail
+          python cloudflare/scripts/export_d1_sql.py \
+            --db apps/api/data/melodify.sqlite3 \
+            --out cloudflare/data/seed.sql
+
+      - name: Validate generated data
+        run: |
+          set -euo pipefail
+          python cloudflare/scripts/validate_generated_data.py \
+            --data-dir cloudflare/data \
+            --source-db apps/api/data/melodify.sqlite3
+
+      - name: Build the React frontend (apps/web)
+        run: |
+          set -euo pipefail
+          # Install workspace deps once at root, then build only @melodify/web.
+          npm ci --include=dev
+          npm run --workspace=@melodify/web build
+          # Copy the build into cloudflare/public so the Worker's assets
+          # binding ships the freshly-rendered SPA.
+          rm -rf cloudflare/public
+          mkdir -p cloudflare/public
+          cp -R apps/web/dist/. cloudflare/public/
+          # Preserve the icon (the Vite build references /Icon.png at root).
+          if [[ -f apps/web/public/Icon.png ]]; then
+            cp apps/web/public/Icon.png cloudflare/public/Icon.png
+          fi
+
+      - name: Resolve active/inactive slots
+        id: slots
+        run: |
+          set -euo pipefail
+          eval "$(python cloudflare/scripts/prepare_release.py --emit-env)"
+          {
+            echo "active_slot=$ACTIVE_SLOT"
+            echo "active_db_id=$ACTIVE_DB_ID"
+            echo "active_db_name=$ACTIVE_DB_NAME"
+            echo "inactive_slot=$INACTIVE_SLOT"
+            echo "inactive_db_id=$INACTIVE_DB_ID"
+            echo "inactive_db_name=$INACTIVE_DB_NAME"
+          } >> "$GITHUB_OUTPUT"
+          echo "Will write into INACTIVE slot: $INACTIVE_SLOT ($INACTIVE_DB_ID)"
+          echo "Currently live ACTIVE slot:    $ACTIVE_SLOT ($ACTIVE_DB_ID)"
+
+      - name: Render wrangler configs (inactive + post-deploy)
+        run: |
+          set -euo pipefail
+          # The single deploy config we're about to use:
+          python cloudflare/scripts/render_wrangler_config.py \
+            --base cloudflare/wrangler.jsonc \
+            --output "$RELEASE_DIR/wrangler.deploy.jsonc" \
+            --worker-name "$WORKER_NAME" \
+            --database-id "${{ steps.slots.outputs.inactive_db_id }}" \
+            --database-name "${{ steps.slots.outputs.inactive_db_name }}"
+
+      - name: Validate rendered wrangler config
+        run: |
+          set -euo pipefail
+          python cloudflare/scripts/validate_wrangler_config.py \
+            --require-database-id "$RELEASE_DIR/wrangler.deploy.jsonc"
+
+      - name: Apply schema to inactive D1 slot
+        working-directory: cloudflare
+        run: |
+          set -euo pipefail
+          npx --yes wrangler@4 d1 execute "${{ steps.slots.outputs.inactive_db_name }}" \
+            --remote --yes \
+            --config "${{ github.workspace }}/$RELEASE_DIR/wrangler.deploy.jsonc" \
+            --file data/schema.sql
+
+      - name: Import seed into inactive D1 slot
+        working-directory: cloudflare
+        run: |
+          set -euo pipefail
+          npx --yes wrangler@4 d1 execute "${{ steps.slots.outputs.inactive_db_name }}" \
+            --remote --yes \
+            --config "${{ github.workspace }}/$RELEASE_DIR/wrangler.deploy.jsonc" \
+            --file data/seed.sql
+
+      - name: Validate inactive D1 (counts + URL coverage)
+        run: |
+          set -euo pipefail
+          python cloudflare/scripts/validate_release.py \
+            --mode d1 \
+            --database-name "${{ steps.slots.outputs.inactive_db_name }}" \
+            --config "$RELEASE_DIR/wrangler.deploy.jsonc"
+
+      - name: Deploy Worker bound to inactive slot
+        working-directory: cloudflare
+        run: |
+          set -euo pipefail
+          npx --yes wrangler@4 deploy \
+            --config "${{ github.workspace }}/$RELEASE_DIR/wrangler.deploy.jsonc"
+
+      - name: HTTP smoke-test the deployed Worker
+        if: env.WORKER_PUBLIC_URL != ''
+        run: |
+          set -euo pipefail
+          # Allow the deploy a few seconds to propagate before hitting it.
+          sleep 5
+          python cloudflare/scripts/validate_release.py \
+            --mode http \
+            --url "$WORKER_PUBLIC_URL"
+
+      - name: Promote — flip active slot marker
+        run: |
+          set -euo pipefail
+          python cloudflare/scripts/prepare_release.py \
+            --promote --deployment-id "${{ github.run_id }}"
+
+      - name: Commit updated active-slot marker
+        run: |
+          set -euo pipefail
+          if git diff --quiet -- .release/active-slot.json; then
+            echo "Marker unchanged; skipping commit."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add .release/active-slot.json
+          git commit -m "chore(release): promote slot to ${{ steps.slots.outputs.inactive_slot }} (run ${{ github.run_id }})"
+          # Refuse force-push; only a fast-forward push back to main is OK.
+          git push origin HEAD:main
+
+      - name: Upload diagnostics on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: refresh-diagnostics-${{ github.run_id }}
+          if-no-files-found: ignore
+          path: |
+            ${{ env.RELEASE_DIR }}/refresh-report.json
+            ${{ env.RELEASE_DIR }}/wrangler.deploy.jsonc
+            cloudflare/data/schema.sql
