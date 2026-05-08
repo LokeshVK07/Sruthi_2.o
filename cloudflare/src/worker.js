@@ -131,6 +131,78 @@ function cleanAlbumName(name) {
 // API handlers
 // ---------------------------------------------------------------------------
 
+async function handleComposers(env) {
+  // Top music directors by song count — backs the "Composers" tab in the
+  // React app. Plain GROUP BY on the songs table; D1 has indexes on
+  // music_director so this is fast.
+  const rows = await env.DB.prepare(
+    `SELECT music_director AS name, COUNT(*) AS songCount,
+            COUNT(DISTINCT album_id) AS albumCount
+     FROM songs
+     WHERE music_director IS NOT NULL AND music_director != ''
+     GROUP BY music_director
+     ORDER BY songCount DESC
+     LIMIT 60`,
+  ).all();
+  return jsonResponse({
+    items: (rows.results || []).map((row) => {
+      const slug = String(row.name)
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, "-")
+        .replace(/^-+|-+$/g, "");
+      return {
+        slug,
+        name: row.name,
+        songCount: Number(row.songCount),
+        albumCount: Number(row.albumCount),
+        coverUrl: null,
+        sampleSongIds: [],
+      };
+    }),
+  });
+}
+
+async function handleComposerSongs(env, slug, url) {
+  // The slug -> composer name mapping. We re-derive name by undoing the slug
+  // (split-on-dash + GROUP BY across music_director where lower(name) matches
+  // any rejoining). Cheaper to compare slug against a slug-of-music_director
+  // expression in SQL.
+  const limit = Math.min(parseInt(url.searchParams.get("limit") || "200", 10) || 200, 500);
+  const rows = await env.DB.prepare(
+    `SELECT song_id, album_id, album_url, album_name, year, music_director, singers,
+            track_number, track_name, image_url, updated_at
+     FROM songs
+     WHERE replace(replace(replace(replace(replace(replace(replace(replace(
+                replace(replace(lower(coalesce(music_director,'')),
+                ' ','-'), '.','-'), ',','-'), '(','-'), ')','-'),
+                '&','-'), '/','-'), '''','-'), '"','-'), '!','-')
+           = ?
+     ORDER BY updated_at DESC
+     LIMIT ?`,
+  ).bind(slug, limit).all();
+  const songs = (rows.results || []).map(normalizeSong);
+  const name = songs.length ? (songs[0].composer || songs[0].artist || slug) : slug;
+  return jsonResponse({
+    slug,
+    name,
+    songCount: songs.length,
+    items: songs.map((song) => ({
+      song_id: song.id,
+      album_id: song.albumId,
+      album_name: song.albumTitle,
+      year: song.year,
+      music_director: song.composer,
+      singers: song.artist,
+      track_number: song.trackNumber,
+      track_name: song.title,
+      image_url: song.artworkUrl,
+      audioUrl: song.audioUrl,
+      streamUrl: song.streamUrl,
+      updated_at: song.updatedAt,
+    })),
+  });
+}
+
 async function handleDiag(env) {
   const diag = { ok: true, schema: { albums: false, songs: false }, counts: {} };
   try {
@@ -633,18 +705,53 @@ export default {
     }
     if (path === "/api/admin/seed") return withErrorHandling(handleSeed)(env, url);
 
-    // Stubs so the frontend's existing calls don't 404.
-    if (
-      path === "/api/playlists" ||
-      path === "/api/favorites" ||
-      path === "/api/composers"
-    ) {
+    // Read-only stubs so the React app's existing calls don't 404.
+    if (path === "/api/playlists" || path === "/api/favorites") {
       return jsonResponse({ items: [] });
+    }
+    if (path === "/api/composers") {
+      return withErrorHandling(handleComposers)(env);
+    }
+    if (path.startsWith("/api/composers/") && path.endsWith("/songs")) {
+      const slug = decodeURIComponent(
+        path.slice("/api/composers/".length, path.length - "/songs".length),
+      );
+      return withErrorHandling(handleComposerSongs)(env, slug, url);
     }
     if (path === "/api/refresh/status") {
       return jsonResponse({ enabled: false, status: "idle", message: "Hosted on Cloudflare" });
     }
-    if (path === "/api/recently-played") return jsonResponse({ ok: true });
+    if (path === "/api/cache/status") {
+      return jsonResponse({
+        fileCount: 0, totalBytes: 0, totalMegabytes: 0, limitMegabytes: 0,
+      });
+    }
+
+    // Write/no-op stubs (POST). Each returns success so the React app's
+    // optimistic UI doesn't roll back. Persistence isn't needed because the
+    // hosted deploy is read-only-ish; favorites/playlists/recents are kept in
+    // localStorage on each friend's browser.
+    if (path === "/api/recently-played" || path.startsWith("/api/recently-played/")) {
+      return jsonResponse({ ok: true });
+    }
+    if (path.startsWith("/api/favorites/") && path.endsWith("/toggle")) {
+      // We don't persist server-side, but the React app reads its own
+      // optimistic state from the response. Toggle to true so a fresh tap
+      // shows the heart filled — the next /api/favorites fetch will reset
+      // it, which is acceptable on this free hosted deploy.
+      return jsonResponse({ active: true });
+    }
+    if (
+      path === "/api/playback/prefetch" ||
+      path === "/api/prefetch" ||
+      path === "/api/prefetch/album" ||
+      path === "/api/warmup"
+    ) {
+      return jsonResponse({ ok: true, queued: 0 });
+    }
+    if (path === "/api/refresh/check") {
+      return jsonResponse({ enabled: false, status: "idle", message: "Hosted on Cloudflare" });
+    }
 
     if (path.startsWith("/api/")) return notFound("API route not implemented on Cloudflare");
 
