@@ -129,9 +129,59 @@ export const apiClient = {
     const data = await api<{ items: ApiSong[] }>("/api/favorites");
     return { items: data.items.map(normalizeSong) };
   },
-  search: async (q: string): Promise<{ items: Song[] }> => {
-    const data = await api<{ items: ApiSong[] }>(`/api/search?q=${encodeURIComponent(q)}`);
+  search: async (q: string, signal?: AbortSignal): Promise<{ items: Song[] }> => {
+    const response = await fetch(`/api/search?q=${encodeURIComponent(q)}`, {
+      credentials: "include",
+      signal,
+    });
+    if (!response.ok) throw new Error(`Request failed: ${response.status}`);
+    const data = (await response.json()) as { items: ApiSong[] };
     return { items: data.items.map(normalizeSong) };
+  },
+  searchAll: async (
+    q: string,
+    limit = 20,
+    signal?: AbortSignal,
+  ): Promise<{
+    query: string;
+    tracks: Song[];
+    albums: Album[];
+    artists: Array<{ artist: string; songCount: number }>;
+    composers: ComposerCollection[];
+  }> => {
+    const response = await fetch(
+      `/api/search/all?q=${encodeURIComponent(q)}&limit=${limit}`,
+      { credentials: "include", signal },
+    );
+    if (!response.ok) throw new Error(`Request failed: ${response.status}`);
+    const data = (await response.json()) as {
+      query: string;
+      tracks: ApiSong[];
+      albums: ApiAlbum[];
+      artists: Array<{ artist: string; songCount: number }>;
+      composers: Array<{
+        slug: string;
+        name: string;
+        songCount: number;
+        albumCount: number;
+        coverUrl?: string | null;
+        sampleSongIds?: string[];
+      }>;
+    };
+    return {
+      query: data.query,
+      tracks: data.tracks.map(normalizeSong),
+      albums: data.albums.map(normalizeAlbum),
+      artists: data.artists,
+      composers: data.composers.map((item) => ({
+        slug: item.slug,
+        name: item.name,
+        songCount: item.songCount,
+        albumCount: item.albumCount,
+        coverUrl: item.coverUrl ?? null,
+        sampleSongIds: item.sampleSongIds ?? [],
+      })),
+    };
   },
   toggleFavorite: (songId: string) => api<{ active: boolean }>(`/api/favorites/${songId}/toggle`, { method: "POST" }),
   recordPlayback: (songId: string) => api<{ ok: boolean }>(`/api/recently-played/${songId}`, { method: "POST" }),

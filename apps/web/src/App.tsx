@@ -1,7 +1,9 @@
-import { startTransition, useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
+import { startTransition, useEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Home, Library, ListMusic, Menu, Search, Users } from "lucide-react";
 import { apiClient } from "./api";
+import { useDebounce } from "./hooks/useDebounce";
+import { normalizeSearchText } from "./searchUtils";
 import Sidebar, { type NavKey } from "./components/Sidebar";
 import NowPlayingHero from "./components/NowPlayingHero";
 import SearchFilterBar from "./components/SearchFilterBar";
@@ -154,7 +156,11 @@ export default function App() {
   const [selectedComposerSlug, setSelectedComposerSlug] = useState<string | null>(null);
   const [playlistTargetTrack, setPlaylistTargetTrack] = useState<Song | null>(null);
   const [recentSearches, setRecentSearches] = useState<string[]>([]);
-  const deferredQuery = useDeferredValue(searchQuery.trim());
+  // Debounced version of `searchQuery` for the heavy work (filtering 28k+
+  // songs, hitting /api/search). The visible <input> stays bound to
+  // `searchQuery`, so typing is instant; only filtering/queries lag by ~200ms.
+  const debouncedQuery = useDebounce(searchQuery.trim(), 200);
+  const deferredQuery = debouncedQuery;
   const warmedUpRef = useRef(false);
   const lastVolumeRef = useRef(0.82);
   const lastRefreshVersionRef = useRef("");
@@ -162,6 +168,10 @@ export default function App() {
   const prefetchedAlbumIdsRef = useRef<Map<string, { leadLimit: number; refreshLinks: boolean }>>(new Map());
   const deckARef = useRef<HTMLAudioElement | null>(null);
   const deckBRef = useRef<HTMLAudioElement | null>(null);
+  // Tracks how many transparent retries we've done for a given song so a flaky
+  // upstream URL gets a second/third chance before we surface an error to the
+  // user. Cleared whenever a different song starts.
+  const playbackRetryRef = useRef<Map<string, number>>(new Map());
   const [activeDeckIndex, setActiveDeckIndex] = useState(0);
 
   const { data: home } = useQuery<HomeResponse>({
@@ -184,10 +194,15 @@ export default function App() {
     queryFn: apiClient.favorites,
     staleTime: 1000 * 30,
   });
-  const { data: searchData } = useQuery<{ items: Song[] }>({
-    queryKey: ["search", deferredQuery],
-    queryFn: () => apiClient.search(deferredQuery),
-    enabled: deferredQuery.length > 0
+  // Grouped backend search. react-query passes an AbortSignal to queryFn and
+  // cancels any in-flight request as soon as `queryKey` changes (i.e. the user
+  // types another character), so we never paint stale results.
+  const { data: searchData, isFetching: isSearchFetching } = useQuery({
+    queryKey: ["search-all", debouncedQuery],
+    queryFn: ({ signal }) => apiClient.searchAll(debouncedQuery, 30, signal),
+    enabled: debouncedQuery.length > 0,
+    staleTime: 30_000,
+    placeholderData: (previous) => previous,
   });
   const { data: selectedAlbum } = useQuery<AlbumDetail>({
     queryKey: ["album", selectedAlbumId],
@@ -241,11 +256,22 @@ export default function App() {
     return map;
   }, [fullLibrary, favoriteSongs]);
   const searchSongResults = useMemo(() => {
-    if (!deferredQuery) return [];
-    const backendItems = searchData?.items ?? [];
+    if (!debouncedQuery) return [];
+    const backendItems = searchData?.tracks ?? [];
     if (backendItems.length) return backendItems;
-    return fullLibrary.filter((song) => titleMatches(song, deferredQuery));
-  }, [deferredQuery, fullLibrary, searchData?.items]);
+    // Fallback to local filter — capped at 50 so we never render the whole
+    // library on slow devices.
+    const lower = debouncedQuery.toLowerCase();
+    const out: Song[] = [];
+    for (const song of fullLibrary) {
+      if (titleMatches(song, lower)) out.push(song);
+      if (out.length >= 50) break;
+    }
+    return out;
+  }, [debouncedQuery, fullLibrary, searchData?.tracks]);
+  const searchAlbumResults = useMemo(() => searchData?.albums ?? [], [searchData?.albums]);
+  const searchArtistResults = useMemo(() => searchData?.artists ?? [], [searchData?.artists]);
+  const searchComposerResults = useMemo(() => searchData?.composers ?? [], [searchData?.composers]);
   const currentSong = useMemo(
     () => queue[currentIndex] ?? pickInitialSong(fullLibrary),
     [queue, currentIndex, fullLibrary]
@@ -258,8 +284,8 @@ export default function App() {
     [recentlyPlayed, songLookup]
   );
   const artistItems = home?.artists ?? [];
-  const filteredRecentSongs = useMemo(() => recentSongs.filter((song) => titleMatches(song, searchQuery)), [recentSongs, searchQuery]);
-  const filteredFavoriteSongs = useMemo(() => favoriteSongs.filter((song) => titleMatches(song, searchQuery)), [favoriteSongs, searchQuery]);
+  const filteredRecentSongs = useMemo(() => recentSongs.filter((song) => titleMatches(song, debouncedQuery)), [recentSongs, debouncedQuery]);
+  const filteredFavoriteSongs = useMemo(() => favoriteSongs.filter((song) => titleMatches(song, debouncedQuery)), [favoriteSongs, debouncedQuery]);
   const selectedPlaylist = useMemo(
     () => customPlaylists.find((playlist) => playlist.id === selectedPlaylistId) ?? null,
     [customPlaylists, selectedPlaylistId]
@@ -342,6 +368,7 @@ export default function App() {
     setCurrentTime(0);
     setDuration(song.durationSeconds && song.durationSeconds > 0 ? song.durationSeconds : 0);
     setBuffering(true);
+    playbackRetryRef.current.delete(song.id);
     if (!inactiveDeck) return;
 
     const nextDeckIndex = activeDeckIndex === 0 ? 1 : 0;
@@ -456,7 +483,7 @@ export default function App() {
     queue.find((song) => song.id === songId) ??
     librarySongs.find((song) => song.id === songId) ??
     favoriteSongs.find((song) => song.id === songId) ??
-    searchData?.items?.find((song) => song.id === songId) ??
+    searchData?.tracks?.find((song: Song) => song.id === songId) ??
     home?.favorites?.find((song) => song.id === songId) ??
     home?.recentlyPlayed?.find((song) => song.id === songId) ??
     fullLibrary.find((song) => song.id === songId) ??
@@ -725,28 +752,29 @@ export default function App() {
           ? selectedPlaylistSongs
         : activeNav === "albums"
           ? selectedAlbum?.songs ?? queueFromAlbum(selectedAlbumId ?? undefined, fullLibrary)
-          : activeNav === "search" && deferredQuery
+          : activeNav === "search" && debouncedQuery
             ? searchSongResults
             : fullLibrary;
-    return base.filter((song) => titleMatches(song, searchQuery));
-  }, [activeNav, favoriteSongs, selectedPlaylist, selectedPlaylistSongs, selectedAlbum?.songs, selectedAlbumId, fullLibrary, deferredQuery, searchSongResults, searchQuery]);
+    if (!debouncedQuery) return base;
+    return base.filter((song) => titleMatches(song, debouncedQuery));
+  }, [activeNav, favoriteSongs, selectedPlaylist, selectedPlaylistSongs, selectedAlbum?.songs, selectedAlbumId, fullLibrary, debouncedQuery, searchSongResults]);
 
   const filteredAlbums = useMemo(
     () =>
       albumItems.filter((album) =>
-        !searchQuery.trim()
+        !debouncedQuery
           ? true
           : [album.name, album.musicDirector ?? "", album.singersSummary ?? "", String(album.year ?? "")]
               .join(" ")
               .toLowerCase()
-              .includes(searchQuery.toLowerCase())
+              .includes(debouncedQuery.toLowerCase())
       ),
-    [albumItems, searchQuery]
+    [albumItems, debouncedQuery]
   );
 
   const filteredPlaylists = useMemo(
-    () => playlistSummaries.filter((playlist) => (!searchQuery.trim() ? true : playlist.name.toLowerCase().includes(searchQuery.toLowerCase()))),
-    [playlistSummaries, searchQuery]
+    () => playlistSummaries.filter((playlist) => (!debouncedQuery ? true : playlist.name.toLowerCase().includes(debouncedQuery.toLowerCase()))),
+    [playlistSummaries, debouncedQuery]
   );
 
   function handleSongSelect(song: Song, sourceQueue?: Song[]) {
@@ -1167,7 +1195,7 @@ export default function App() {
       }
 
       const composerList = (composersData?.items ?? []).filter((composer) =>
-        !searchQuery.trim() ? true : composer.name.toLowerCase().includes(searchQuery.toLowerCase())
+        !debouncedQuery ? true : composer.name.toLowerCase().includes(debouncedQuery.toLowerCase())
       );
       return (
         <section className="content-section">
@@ -1298,8 +1326,22 @@ export default function App() {
           }}
           onLoadedMetadata={(event) => {
             if (deckIndex !== activeDeckIndex) return;
-            debugPlayback("loaded-metadata", event.currentTarget.dataset.songId, event.currentTarget.duration);
-            setDuration(event.currentTarget.duration || currentSong?.durationSeconds || 0);
+            const reported = event.currentTarget.duration;
+            debugPlayback("loaded-metadata", event.currentTarget.dataset.songId, reported);
+            // Some MP3s without a Xing/VBR header report duration as Infinity
+            // (or a partial estimate that grows as more bytes arrive). Only
+            // accept finite positive values; otherwise fall back to the stored
+            // metadata so the scrub bar shows an em-dash placeholder rather
+            // than pinning the thumb to an arbitrary point.
+            const finite = Number.isFinite(reported) && reported > 0 ? reported : 0;
+            setDuration(finite || currentSong?.durationSeconds || 0);
+          }}
+          onDurationChange={(event) => {
+            if (deckIndex !== activeDeckIndex) return;
+            const reported = event.currentTarget.duration;
+            if (Number.isFinite(reported) && reported > 0) {
+              setDuration((prev) => (prev === reported ? prev : reported));
+            }
           }}
           onCanPlay={() => {
             if (deckIndex !== activeDeckIndex) return;
@@ -1331,21 +1373,32 @@ export default function App() {
             const failedSongId = failedDeck.dataset.songId;
             debugPlayback("error", failedSongId);
             setBuffering(false);
-            setPlaying(false);
-            setHeroFeedback("Source unavailable for this track. Try another song.");
-            // Probe the backend so the user sees why it failed.
-            if (failedSongId) {
-              fetch(`/api/song-status/${encodeURIComponent(failedSongId)}`, { credentials: "include" })
-                .then((response) => response.ok ? response.json() : null)
-                .then((status) => {
-                  if (!status) return;
-                  if (status.cache_status === "unavailable") {
-                    setHeroFeedback("Source link expired — masstamilan.dev is blocking the file. Skipping…");
-                    handleNextTrack();
-                  }
-                })
-                .catch(() => {});
+            // Most "errors" we see are transient: the masstamilan URL has
+            // expired, or a CF-blocked album's first attempt is racing the
+            // Playwright fallback. The backend always refreshes URLs and
+            // retries on its own — silently re-load with a fresh cache-bust
+            // up to 3 times. Each retry has progressively more backoff so
+            // the server has time to fall back to Playwright if needed.
+            const retries = playbackRetryRef.current.get(failedSongId ?? "") ?? 0;
+            if (failedSongId && retries < 3 && currentSong && currentSong.id === failedSongId) {
+              playbackRetryRef.current.set(failedSongId, retries + 1);
+              const bust = `${songStreamUrl(currentSong)}${songStreamUrl(currentSong).includes("?") ? "&" : "?"}retry=${Date.now()}`;
+              const backoffMs = retries === 0 ? 250 : retries === 1 ? 1500 : 4000;
+              debugPlayback("retry", failedSongId, retries + 1, `backoff=${backoffMs}ms`);
+              setBuffering(true);
+              window.setTimeout(() => {
+                if (failedDeck.dataset.songId !== failedSongId) return;
+                failedDeck.src = bust;
+                failedDeck.load();
+                void safePlay(failedDeck);
+              }, backoffMs);
+              return;
             }
+            // After 3 retries the track really is unrecoverable for now —
+            // skip to the next one rather than stranding the user.
+            setPlaying(false);
+            debugPlayback("auto-skip", failedSongId);
+            handleNextTrack();
           }}
         />
       ))}
@@ -1355,7 +1408,13 @@ export default function App() {
             appName={APP_NAME}
             activeTab={mobileSearchOpen ? "search" : mobileTab}
             librarySection={mobileLibrarySection}
-            searchQuery={searchQuery}
+            searchQuery={debouncedQuery}
+            searchInput={searchQuery}
+            searchActive={isSearchFetching}
+            searchTracks={searchData?.tracks}
+            searchAlbums={searchData?.albums}
+            searchArtists={searchData?.artists}
+            searchComposers={searchData?.composers}
             selectedFilter={selectedFilter}
             recentSearches={recentSearches}
             currentSong={currentSong}
@@ -1551,11 +1610,12 @@ export default function App() {
                 refreshState={refreshStatus}
                 refreshPending={manualRefreshCheck.isPending}
                 onQueryChange={(value) => {
-                  startTransition(() => {
-                    setSearchQuery(value);
-                    if (value.trim()) setActiveNav("search");
-                    else if (activeNav === "search") setActiveNav("home");
-                  });
+                  // Update the visible input synchronously so typing is
+                  // instant; heavy work (filtering, /api/search) is throttled
+                  // separately by `debouncedQuery`.
+                  setSearchQuery(value);
+                  if (value.trim()) setActiveNav("search");
+                  else if (activeNav === "search") setActiveNav("home");
                 }}
                 onToggleFilter={() => setFilterOpen((open) => !open)}
                 onSelectFilter={handleFilterSelect}

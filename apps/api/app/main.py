@@ -37,6 +37,9 @@ from .repository import (
     next_songs_for_prefetch,
     recent_for_warmup,
     record_recently_played,
+    search_albums,
+    search_artists,
+    search_composers,
     search_frontend_songs,
     search_songs,
     toggle_favorite,
@@ -134,6 +137,28 @@ def song(song_id: str):
 @app.get("/api/search")
 def search(q: str):
     return {"items": [song.model_dump() for song in search_frontend_songs(q)]}
+
+
+@app.get("/api/search/all")
+def search_all(q: str, limit: int = 20):
+    """Grouped search across tracks, albums, artists, and composers.
+
+    The frontend uses this to drive its global search UI in one round-trip;
+    each section is independently capped so a noisy track match can't crowd
+    out album/artist hits.
+    """
+    bounded = max(1, min(limit, 50))
+    tracks = search_frontend_songs(q, limit=bounded)
+    albums = search_albums(q, limit=min(bounded, 20))
+    artists = search_artists(q, limit=12)
+    composers = search_composers(q, limit=12)
+    return {
+        "query": q,
+        "tracks": [song.model_dump() for song in tracks],
+        "albums": [album.model_dump() for album in albums],
+        "artists": artists,
+        "composers": composers,
+    }
 
 
 @app.get("/api/favorites")

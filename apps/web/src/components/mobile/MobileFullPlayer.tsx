@@ -44,7 +44,7 @@ type MobileFullPlayerProps = {
 };
 
 function formatTime(seconds: number) {
-  if (!Number.isFinite(seconds) || seconds <= 0) return "0:00";
+  if (!Number.isFinite(seconds) || seconds <= 0) return "";
   const mins = Math.floor(seconds / 60);
   const secs = Math.floor(seconds % 60);
   return `${mins}:${String(secs).padStart(2, "0")}`;
@@ -81,6 +81,18 @@ export default function MobileFullPlayer(props: MobileFullPlayerProps) {
 
   if (!open || !song) return null;
 
+  // The browser sometimes reports `duration` as Infinity for partially-buffered
+  // MP3s without a Xing/VBR header, or as 0 before metadata loads. Reject
+  // anything non-finite so the thumb stays at the start instead of pinning to
+  // the right end of the track.
+  const hasDuration = Number.isFinite(duration) && duration > 0;
+  const safeDuration = hasDuration ? duration : 0;
+  const progressPercent = hasDuration
+    ? Math.min(100, Math.max(0, (currentTime / safeDuration) * 100))
+    : 0;
+  const progressMax = hasDuration ? safeDuration : 1;
+  const progressValue = hasDuration ? Math.min(currentTime, safeDuration) : 0;
+
   return (
     <div className="mobile-overlay">
       <div className="mobile-full-player">
@@ -108,13 +120,18 @@ export default function MobileFullPlayer(props: MobileFullPlayerProps) {
           <input
             type="range"
             min={0}
-            max={Math.max(duration, 1)}
-            value={Math.min(currentTime, Math.max(duration, 1))}
+            max={progressMax}
+            step={hasDuration ? 0.1 : 1}
+            value={progressValue}
+            disabled={!hasDuration}
             onChange={(event) => onSeek(Number(event.target.value))}
+            style={{
+              background: `linear-gradient(90deg, #e056ff 0%, #ff6ee7 ${progressPercent}%, rgba(255,255,255,0.16) ${progressPercent}%, rgba(255,255,255,0.16) 100%)`,
+            }}
           />
           <div className="mobile-full-player__times">
-            <span>{formatTime(currentTime)}</span>
-            <span>{buffering ? "Buffering…" : formatTime(duration)}</span>
+            <span>{formatTime(currentTime) || "0:00"}</span>
+            <span>{buffering ? "Buffering…" : formatTime(safeDuration) || "—:—"}</span>
           </div>
         </div>
 

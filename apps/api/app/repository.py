@@ -540,6 +540,94 @@ def search_frontend_songs(query: str, limit: int = 100, user_id: str = DEFAULT_U
     return [_map_public_song(row, favorite_ids) for row in rows]
 
 
+def search_albums(query: str, limit: int = 12) -> list[AlbumRecord]:
+    """Search albums by name and music director with simple ranking."""
+    normalized = query.strip().lower()
+    if not normalized:
+        return []
+    pattern = f"%{normalized}%"
+    prefix = f"{normalized}%"
+    rows = get_connection().execute(
+        """
+        SELECT * FROM albums
+        WHERE lower(album_name) LIKE ? OR lower(coalesce(music_director,'')) LIKE ?
+        ORDER BY
+          CASE
+            WHEN lower(album_name) = ? THEN 0
+            WHEN lower(album_name) LIKE ? THEN 1
+            WHEN lower(coalesce(music_director,'')) LIKE ? THEN 2
+            ELSE 3
+          END,
+          updated_at DESC
+        LIMIT ?
+        """,
+        [pattern, pattern, normalized, prefix, prefix, limit],
+    ).fetchall()
+    return [AlbumRecord(**dict(row)) for row in rows]
+
+
+def search_artists(query: str, limit: int = 12) -> list[dict[str, Any]]:
+    """Distinct singers/artists matching `query`, ranked by occurrence count."""
+    normalized = query.strip().lower()
+    if not normalized:
+        return []
+    pattern = f"%{normalized}%"
+    rows = get_connection().execute(
+        """
+        SELECT singers AS artist, COUNT(*) AS song_count
+        FROM songs
+        WHERE singers IS NOT NULL AND singers != ''
+              AND lower(singers) LIKE ?
+        GROUP BY singers
+        ORDER BY
+          CASE WHEN lower(singers) = ? THEN 0
+               WHEN lower(singers) LIKE ? THEN 1
+               ELSE 2 END,
+          song_count DESC
+        LIMIT ?
+        """,
+        [pattern, normalized, f"{normalized}%", limit],
+    ).fetchall()
+    return [{"artist": row[0], "songCount": int(row[1])} for row in rows]
+
+
+def search_composers(query: str, limit: int = 12) -> list[dict[str, Any]]:
+    """Composers/music directors matching `query`."""
+    normalized = query.strip().lower()
+    if not normalized:
+        return []
+    pattern = f"%{normalized}%"
+    rows = get_connection().execute(
+        """
+        SELECT music_director AS name, COUNT(*) AS song_count, COUNT(DISTINCT album_id) AS album_count
+        FROM songs
+        WHERE music_director IS NOT NULL AND music_director != ''
+              AND lower(music_director) LIKE ?
+        GROUP BY music_director
+        ORDER BY
+          CASE WHEN lower(music_director) = ? THEN 0
+               WHEN lower(music_director) LIKE ? THEN 1
+               ELSE 2 END,
+          song_count DESC
+        LIMIT ?
+        """,
+        [pattern, normalized, f"{normalized}%", limit],
+    ).fetchall()
+    results: list[dict[str, Any]] = []
+    for row in rows:
+        name = row[0]
+        slug = "".join(ch.lower() if ch.isalnum() else "-" for ch in name).strip("-") or name.lower()
+        results.append({
+            "slug": slug,
+            "name": name,
+            "songCount": int(row[1]),
+            "albumCount": int(row[2]),
+            "coverUrl": None,
+            "sampleSongIds": [],
+        })
+    return results
+
+
 def song_status(song_id: str, cache_status: str) -> SongStatus | None:
     song = get_song(song_id)
     if not song:

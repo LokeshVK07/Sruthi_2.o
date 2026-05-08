@@ -28,3 +28,8 @@ apps/server/apps/server/
 apps/server/src/python/__pycache__/
 
 apps/apps/
+
+# cloudflare deploy artefacts
+cloudflare/node_modules
+cloudflare/.wrangler
+cloudflare/scripts/__pycache__/

@@ -646,6 +646,249 @@
   text-align: center;
 }
 
+.mobile-empty-state--soft {
+  color: var(--text-soft);
+  padding: 12px 8px;
+  font-size: 0.9rem;
+}
+
+/* ===== Branded mobile header ===== */
+.mobile-screen__header--branded {
+  align-items: center;
+}
+
+.mobile-brand {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+}
+
+.mobile-brand__copy {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.mobile-brand__copy strong {
+  font-size: 1.1rem;
+  white-space: nowrap;
+}
+
+.mobile-brand__copy span {
+  font-size: 0.78rem;
+  color: var(--text-soft);
+  white-space: nowrap;
+}
+
+/* ===== Mobile search bar (shared layout, used by Home trigger + Search input) ===== */
+.mobile-search-bar {
+  display: grid;
+  grid-template-columns: 22px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  height: 52px;
+  padding: 0 14px;
+  border-radius: 18px;
+  background: rgba(24, 20, 44, 0.82);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  box-shadow: 0 16px 36px rgba(0, 0, 0, 0.24);
+  backdrop-filter: blur(18px);
+  width: 100%;
+  text-align: left;
+  color: var(--text);
+}
+
+.mobile-search-bar__icon {
+  color: var(--text-soft);
+}
+
+.mobile-search-bar__placeholder {
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: var(--text-soft);
+  font-size: 0.95rem;
+}
+
+.mobile-search-bar__status {
+  color: var(--accent-2);
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+  white-space: nowrap;
+}
+
+.mobile-search-bar--input input {
+  min-width: 0;
+  width: 100%;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  color: var(--text);
+  font-size: 1rem;
+  padding: 0;
+}
+
+.mobile-search-bar__clear {
+  width: 28px;
+  height: 28px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.08);
+  display: grid;
+  place-items: center;
+  color: var(--text-soft);
+}
+
+.mobile-search-bar__clear--ghost {
+  background: transparent;
+}
+
+@keyframes mobile-search-spin {
+  to { transform: rotate(360deg); }
+}
+
+.mobile-search-bar__spinner {
+  animation: mobile-search-spin 0.9s linear infinite;
+}
+
+.mobile-search-cancel {
+  background: transparent;
+  color: var(--accent-2);
+  font-weight: 600;
+  padding: 0 6px;
+  flex: 0 0 auto;
+}
+
+/* ===== Mobile playlists row ===== */
+.mobile-playlists-row {
+  display: grid;
+  grid-auto-flow: column;
+  grid-auto-columns: 138px;
+  gap: 12px;
+  overflow-x: auto;
+  padding-bottom: 6px;
+  scroll-snap-type: x mandatory;
+  -webkit-overflow-scrolling: touch;
+}
+
+.mobile-playlist-card {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 8px;
+  padding: 12px;
+  border-radius: 22px;
+  background: rgba(24, 20, 44, 0.82);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  box-shadow: 0 18px 38px rgba(0, 0, 0, 0.28);
+  backdrop-filter: blur(18px);
+  text-align: left;
+  scroll-snap-align: start;
+  transition: border-color 0.15s ease, transform 0.15s ease;
+}
+
+.mobile-playlist-card:active {
+  transform: scale(0.98);
+}
+
+.mobile-playlist-card:hover,
+.mobile-playlist-card:focus-visible {
+  border-color: rgba(216, 92, 255, 0.55);
+  box-shadow: 0 18px 38px rgba(216, 92, 255, 0.22);
+  outline: none;
+}
+
+.mobile-playlist-card__art {
+  display: grid;
+  place-items: center;
+  width: 100%;
+  aspect-ratio: 1 / 1;
+  border-radius: 16px;
+  color: white;
+  font-size: 1.25rem;
+}
+
+.mobile-playlist-card__art--ghost {
+  background: rgba(255, 255, 255, 0.06) !important;
+  border: 1px dashed rgba(255, 255, 255, 0.18);
+  color: var(--text-soft);
+}
+
+.mobile-playlist-card strong {
+  display: block;
+  font-size: 0.96rem;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.mobile-playlist-card span {
+  font-size: 0.78rem;
+  color: var(--text-soft);
+}
+
+.mobile-playlist-card--favorites strong {
+  background: linear-gradient(120deg, #ff5e8a, #d85cff);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+
+/* ===== Mini player: 4-button action row ===== */
+.mobile-mini-player {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 12px;
+  align-items: center;
+}
+
+.mobile-mini-player__actions {
+  display: flex;
+  gap: 6px;
+  flex: 0 0 auto;
+}
+
+.mobile-mini-player__actions button {
+  min-width: 38px;
+  min-height: 38px;
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.06);
+  display: grid;
+  place-items: center;
+  color: var(--text);
+}
+
+.mobile-mini-player__play {
+  background: linear-gradient(135deg, var(--accent), var(--accent-2)) !important;
+  box-shadow: 0 10px 20px rgba(216, 92, 255, 0.32);
+}
+
+@media (max-width: 360px) {
+  .mobile-mini-player__actions button {
+    min-width: 34px;
+    min-height: 34px;
+  }
+}
+
+/* ===== Search history chips ===== */
+.mobile-search-history {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.mobile-search-history button {
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  border-radius: 999px;
+  padding: 8px 14px;
+  color: var(--text);
+  font-size: 0.85rem;
+}
+
 @media (max-width: 640px) {
   body {
     overflow-x: hidden;

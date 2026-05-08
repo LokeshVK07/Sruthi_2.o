@@ -1,5 +1,5 @@
 import { useMemo } from "react";
-import type { Album, AlbumDetail, RefreshStatus, Song } from "../../types";
+import type { Album, AlbumDetail, ComposerCollection, RefreshStatus, Song } from "../../types";
 import type { RepeatMode } from "../../store";
 import MobileAddToPlaylistSheet from "./MobileAddToPlaylistSheet";
 import MobileAlbumDetail from "./MobileAlbumDetail";
@@ -24,8 +24,14 @@ type MobileLayoutProps = {
   activeTab: MobileTabKey;
   librarySection: MobileLibrarySection;
   searchQuery: string;
+  searchInput: string;
+  searchActive: boolean;
   selectedFilter: "all" | "tracks" | "albums" | "artists" | "playlists";
   recentSearches: string[];
+  searchTracks?: Song[];
+  searchAlbums?: Album[];
+  searchArtists?: Array<{ artist: string; songCount: number }>;
+  searchComposers?: ComposerCollection[];
   currentSong: Song | null;
   fallbackArt: string;
   currentTime: number;
@@ -195,35 +201,49 @@ export default function MobileLayout(props: MobileLayoutProps) {
     onPrefetchTrack,
   } = props;
 
+  // Heavy filtering keys off the *debounced* `searchQuery` (passed in from
+  // App.tsx). The visible <input> stays bound to `searchInput`, so typing is
+  // never blocked by 28k-row scans. We also cap every list so a wide query
+  // doesn't try to render thousands of rows.
+  const normalized = useMemo(() => searchQuery.trim().toLowerCase(), [searchQuery]);
+
   const filteredSongs = useMemo(() => {
-    const normalized = searchQuery.trim().toLowerCase();
+    // Prefer the backend's ranked tracks when present.
+    if (props.searchTracks && props.searchTracks.length) return props.searchTracks.slice(0, 50);
     if (!normalized) return fullLibrary.slice(0, 20);
-    return fullLibrary
-      .filter((song) =>
-        [song.title, song.artist, song.albumTitle, song.composer || ""].join(" ").toLowerCase().includes(normalized)
-      )
-      .slice(0, 20);
-  }, [fullLibrary, searchQuery]);
+    const out: Song[] = [];
+    for (const song of fullLibrary) {
+      if ([song.title, song.artist, song.albumTitle, song.composer || ""].join(" ").toLowerCase().includes(normalized)) {
+        out.push(song);
+        if (out.length >= 50) break;
+      }
+    }
+    return out;
+  }, [fullLibrary, normalized, props.searchTracks]);
 
   const filteredAlbums = useMemo(() => {
-    const normalized = searchQuery.trim().toLowerCase();
+    if (props.searchAlbums && props.searchAlbums.length) return props.searchAlbums.slice(0, 30);
     if (!normalized) return albums.slice(0, 20);
-    return albums.filter((album) =>
-      [album.name, album.musicDirector || "", album.singersSummary || ""].join(" ").toLowerCase().includes(normalized)
-    );
-  }, [albums, searchQuery]);
+    return albums
+      .filter((album) =>
+        [album.name, album.musicDirector || "", album.singersSummary || ""]
+          .join(" ")
+          .toLowerCase()
+          .includes(normalized),
+      )
+      .slice(0, 30);
+  }, [albums, normalized, props.searchAlbums]);
 
   const filteredArtists = useMemo(() => {
-    const normalized = searchQuery.trim().toLowerCase();
-    if (!normalized) return artists;
-    return artists.filter((artist) => artist.artist.toLowerCase().includes(normalized));
-  }, [artists, searchQuery]);
+    if (props.searchArtists && props.searchArtists.length) return props.searchArtists.slice(0, 20);
+    if (!normalized) return artists.slice(0, 20);
+    return artists.filter((artist) => artist.artist.toLowerCase().includes(normalized)).slice(0, 20);
+  }, [artists, normalized, props.searchArtists]);
 
   const filteredPlaylists = useMemo(() => {
-    const normalized = searchQuery.trim().toLowerCase();
     if (!normalized) return playlists;
     return playlists.filter((playlist) => playlist.name.toLowerCase().includes(normalized));
-  }, [playlists, searchQuery]);
+  }, [playlists, normalized]);
 
   const selectedArtistSongs = useMemo(
     () => (selectedArtist ? fullLibrary.filter((song) => song.artist.toLowerCase().includes(selectedArtist.toLowerCase())) : []),
@@ -267,13 +287,19 @@ export default function MobileLayout(props: MobileLayoutProps) {
   } else if (activeTab === "search") {
     content = (
       <MobileSearch
-        query={searchQuery}
+        // The <input> stays bound to the *unfiltered* `searchInput` so typing
+        // is instant; results below derive from the debounced `searchQuery`.
+        inputValue={props.searchInput}
+        debouncedQuery={searchQuery}
+        isSearching={props.searchActive}
         selectedFilter={selectedFilter}
         recentSearches={recentSearches}
         songs={filteredSongs}
         albums={filteredAlbums}
         artists={filteredArtists}
+        composers={props.searchComposers ?? []}
         playlists={filteredPlaylists}
+        fallbackArt={fallbackArt}
         onQueryChange={onSearchQueryChange}
         onClose={onCloseSearch}
         onSelectFilter={onSelectFilter}
@@ -352,23 +378,21 @@ export default function MobileLayout(props: MobileLayoutProps) {
     content = (
       <MobileHome
         appName={appName}
-        song={currentSong}
-        artwork={currentSong ? currentSong.artworkUrl || fallbackArt : fallbackArt}
-        favorites={favorites}
         recentlyPlayed={recentlyPlayed}
         refreshStatus={refreshStatus}
-        searchQuery={searchQuery}
-        buffering={buffering}
-        isPlaying={isPlaying}
+        searchQuery={props.searchInput}
+        favoriteCount={favorites.length}
+        playlists={playlists}
         onQueryChange={onSearchQueryChange}
         onOpenSearch={onOpenSearch}
         onOpenRefresh={onOpenRefresh}
         onOpenSettings={onOpenCreatePlaylist}
-        onOpenPlayer={onOpenFullPlayer}
-        onTogglePlay={onTogglePlay}
         onPlayTrack={onPlayTrack}
-        onViewFavorites={() => { onTabChange("library"); onLibrarySectionChange("favorites"); }}
+        onViewPlaylists={() => { onTabChange("library"); onLibrarySectionChange("playlists"); }}
         onViewRecent={() => { onTabChange("library"); onLibrarySectionChange("recent"); }}
+        onOpenPlaylist={onOpenPlaylist}
+        onOpenFavorites={() => { onTabChange("library"); onLibrarySectionChange("favorites"); }}
+        onCreatePlaylist={onOpenCreatePlaylist}
         onPrefetchTrack={onPrefetchTrack}
       />
     );
@@ -386,8 +410,9 @@ export default function MobileLayout(props: MobileLayoutProps) {
           duration={duration}
           isPlaying={isPlaying}
           onTogglePlay={onTogglePlay}
+          onPrevious={onPrevious}
+          onNext={onNext}
           onOpenPlayer={onOpenFullPlayer}
-          onOpenQueue={onOpenQueue}
         />
       ) : null}
 

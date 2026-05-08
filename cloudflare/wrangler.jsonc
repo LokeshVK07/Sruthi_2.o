@@ -1,0 +1,45 @@
+{
+  // Sruthi 2.o — Cloudflare Worker that serves the catalogue API + static
+  // frontend assets, with a D1 database holding the song/album rows.
+  //
+  // Deploy with:
+  //   cd cloudflare
+  //   npx wrangler@latest d1 create sruthi-catalog
+  //   # paste the database_id printed by that command into "database_id" below
+  //   npx wrangler@latest d1 execute sruthi-catalog --remote --file=data/seed.sql
+  //   npx wrangler@latest deploy
+  //
+  // The Worker URL will be:
+  //   https://sruthi-2o.<your-cf-subdomain>.workers.dev
+  // and friends can hit it directly. No payment, no card on file.
+
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "sruthi-2o",
+  "main": "src/worker.js",
+  "compatibility_date": "2025-04-01",
+  "compatibility_flags": ["nodejs_compat"],
+
+  // Static assets (frontend) shipped alongside the Worker. /api/* routes go to
+  // the Worker; everything else falls through to public/ via Pages-style asset
+  // serving.
+  "assets": {
+    "directory": "./public",
+    "binding": "ASSETS",
+    "not_found_handling": "single-page-application"
+  },
+
+  // D1 binding. After `wrangler d1 create`, replace the database_id below with
+  // the UUID it prints. Keep `binding` as "DB" — the Worker imports it as
+  // `env.DB`.
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "sruthi-catalog",
+      "database_id": "REPLACE_WITH_D1_DATABASE_ID"
+    }
+  ],
+
+  "observability": {
+    "enabled": true
+  }
+}

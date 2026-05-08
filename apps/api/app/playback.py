@@ -45,7 +45,7 @@ ACCEPTED_TYPES = {"audio/mpeg", "audio/mp3", "audio/aac", "audio/ogg", "audio/wa
 CHUNK_SIZE = 131072
 METADATA_CACHE_TTL_SECONDS = 300.0
 RESOLVED_URL_TTL_SECONDS = 1800.0
-FAILED_URL_TTL_SECONDS = 20.0
+FAILED_URL_TTL_SECONDS = 4.0
 INTERACTIVE_CONNECT_TIMEOUT = 5.0
 INTERACTIVE_READ_TIMEOUT = 25.0
 # masstamilan rejects unknown UAs. Use a real Chrome UA string.
