@@ -201,6 +201,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--skip-pagewise", action="store_true", help="Skip the paginated tamil-songs scan.")
     parser.add_argument("--skip-movie-index", action="store_true", help="Skip the movie-index scan.")
+    parser.add_argument("--skip-rescrape", action="store_true", help="Skip the full-mode known-album detail rescrape.")
     parser.add_argument("--workers", type=int, default=4, help="Bounded worker count used for album detail parsing.")
     parser.add_argument("--batch-size", type=int, default=16, help="Album detail batch size.")
     parser.add_argument("--start-page", type=int, default=1, help="First tamil-songs listing page to scan.")
@@ -313,7 +314,7 @@ def main() -> None:
                     report["warnings"].append(message)
                     print(f"WARN - {message}")
 
-            if args.full:
+            if args.full and not args.skip_rescrape:
                 cap = args.max_rescrape if args.max_rescrape and args.max_rescrape > 0 else None
                 if cap:
                     print(f"INFO - [3/3] Re-scraping up to {cap} prioritised albums (capped) ...")

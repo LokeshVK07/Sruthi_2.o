@@ -316,7 +316,8 @@ jobs:
           MASSTAMILAN_RETRY_BASE_DELAY: "8"
           MASSTAMILAN_RETRY_MAX_DELAY: "45"
           MASSTAMILAN_CHALLENGE_COOLDOWN: "45"
-          MASSTAMILAN_MAX_CHALLENGE_STREAK: "4"
+          MASSTAMILAN_MAX_CHALLENGE_STREAK: "1"
+          PYTHONUNBUFFERED: "1"
         run: |
           set -euo pipefail
 
@@ -328,7 +329,7 @@ jobs:
           batch_size=$(( workers * 3 ))
 
           mode_label="FULL PAGEWISE SOURCE CRAWL"
-          args=(--full --mode pagewise --workers "${workers}" --batch-size "${batch_size}" --report-path "${REFRESH_REPORT}")
+          args=(--full --mode pagewise --skip-rescrape --workers "${workers}" --batch-size "${batch_size}" --report-path "${REFRESH_REPORT}")
 
           echo "::group::Refresh configuration"
           echo "  mode                  = $mode_label"
