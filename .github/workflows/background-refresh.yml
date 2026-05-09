@@ -42,6 +42,7 @@ jobs:
       RELEASE_MANIFEST: cloudflare/.generated/release-manifest.json
       RELEASE_DUCKDB: cloudflare/.generated/release-check.duckdb
       REFRESH_REPORT: cloudflare/.generated/refresh-report.json
+      BASELINE_DB: data/sruthi.baseline.sqlite3
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
@@ -278,38 +279,36 @@ jobs:
           PY
 
       - name: Bootstrap working DB from committed catalogue
-        # The scraper's early-stop ("page is fully known → stop") only fires
-        # when it can compare the listing page against the existing
-        # known_album_urls in the SQLite. CI runs always start with the
-        # committed apps/api/data/melodify.sqlite3 — copy it to data/sruthi.db
-        # (the path tools/masstamilan_refresh.py writes to) so the scraper
-        # really sees the previous catalogue. We never start from an empty DB
-        # on a normal scheduled refresh: a fully-blocked scrape would then
-        # produce a near-empty catalogue and confuse the cliff-fall guard.
+        # Keep a known-good committed catalogue as a fallback, then let the
+        # refresh step start from a fresh DB so successful runs produce the
+        # full listing-page crawl logs: "Listing page N: 10 albums, 10 new".
         run: |
           set -euo pipefail
           src="apps/api/data/melodify.sqlite3"
-          dst="data/sruthi.db"
+          dst="${BASELINE_DB}"
           if [[ ! -f "$src" ]]; then
             echo "::error::Committed baseline DB not found at $src. Refusing to start from an empty DB."
             exit 1
           fi
           mkdir -p "$(dirname "$dst")"
           cp "$src" "$dst"
+          rm -f data/sruthi.db data/sruthi.db-wal data/sruthi.db-shm
           python - <<'PY'
+          import os
           import sqlite3
-          conn = sqlite3.connect("file:data/sruthi.db?mode=ro", uri=True)
+          conn = sqlite3.connect(f"file:{os.environ['BASELINE_DB']}?mode=ro", uri=True)
           albums = conn.execute("SELECT COUNT(*) FROM albums").fetchone()[0]
           songs = conn.execute("SELECT COUNT(*) FROM songs").fetchone()[0]
           conn.close()
-          print(f"Bootstrapped working DB: {albums:,} albums, {songs:,} songs (the scraper will merge new/updated rows on top of these).")
+          print(f"Stored fallback baseline DB: {albums:,} albums, {songs:,} songs.")
+          print("Fresh source crawl will write data/sruthi.db from scratch.")
           PY
 
       - name: Refresh catalog from MassTamilan
-        # Use the runner's full CPU shape like the proven Sruthi workflow,
-        # but keep this repo's safer baseline bootstrap. If the upstream site
-        # blocks GitHub runner IPs, deploy the already-validated committed
-        # catalogue instead of failing the whole refresh/deploy pipeline.
+        # Use the runner's full CPU shape like the proven Sruthi workflow and
+        # force a full scratch crawl so the logs show each listing page as new.
+        # If the upstream site blocks GitHub runner IPs, restore the baseline
+        # DB and let release validation deploy that known-good catalogue.
         env:
           MASSTAMILAN_MAX_CHALLENGE_STREAK: "4"
         run: |
@@ -322,12 +321,8 @@ jobs:
           )"
           batch_size=$(( workers * 4 ))
 
-          mode_label="INCREMENTAL"
-          args=(--workers "${workers}" --batch-size "${batch_size}" --report-path "${REFRESH_REPORT}")
-          if [[ "${SRUTHI_FULL_REFRESH}" == "true" ]]; then
-            mode_label="FULL (manual)"
-            args+=(--full)
-          fi
+          mode_label="FULL SOURCE CRAWL"
+          args=(--full --workers "${workers}" --batch-size "${batch_size}" --report-path "${REFRESH_REPORT}")
 
           echo "::group::Refresh configuration"
           echo "  mode                  = $mode_label"
@@ -347,7 +342,9 @@ jobs:
             exit 0
           fi
 
-          echo "::warning::MassTamilan refresh exited with status ${refresh_status}. Continuing with the bootstrapped committed catalogue; release validation will still enforce catalogue floors."
+          echo "::warning::MassTamilan refresh exited with status ${refresh_status}. Restoring the committed baseline catalogue; release validation will still enforce catalogue floors."
+          cp "${BASELINE_DB}" data/sruthi.db
+          rm -f data/sruthi.db-wal data/sruthi.db-shm
           if [[ -f "${REFRESH_REPORT}" ]]; then
             python - <<'PY'
           import json
@@ -379,6 +376,21 @@ jobs:
           }, indent=2, sort_keys=True))
           PY
           fi
+          if [[ ! -f "${REFRESH_REPORT}" ]]; then
+            python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          path = Path(os.environ["REFRESH_REPORT"])
+          path.parent.mkdir(parents=True, exist_ok=True)
+          path.write_text(json.dumps({
+              "status": "failed-before-report",
+              "success": False,
+              "warnings": ["Refresh did not create a report; baseline DB restored."],
+          }, indent=2) + "\n", encoding="utf-8")
+          PY
+          fi
 
       - name: Validate refreshed local catalog files
         run: |
@@ -395,12 +407,26 @@ jobs:
       - name: Validate catalog and build release seed
         run: |
           set -euo pipefail
-          python cloudflare/scripts/prepare_release.py \
-            --db data/sruthi.db \
-            --seed cloudflare/data/seed.sql \
-            --baseline cloudflare/data/release-baseline.json \
-            --manifest "${RELEASE_MANIFEST}" \
-            --duckdb-path "${RELEASE_DUCKDB}"
+          run_prepare_release() {
+            python cloudflare/scripts/prepare_release.py \
+              --db data/sruthi.db \
+              --seed cloudflare/data/seed.sql \
+              --baseline cloudflare/data/release-baseline.json \
+              --manifest "${RELEASE_MANIFEST}" \
+              --duckdb-path "${RELEASE_DUCKDB}"
+          }
+
+          set +e
+          run_prepare_release
+          prepare_status=$?
+          set -e
+
+          if [[ $prepare_status -ne 0 ]]; then
+            echo "::warning::Fresh source catalogue failed release validation with status ${prepare_status}. Restoring committed baseline DB and rebuilding release seed."
+            cp "${BASELINE_DB}" data/sruthi.db
+            rm -f data/sruthi.db-wal data/sruthi.db-shm
+            run_prepare_release
+          fi
 
           if [[ ! -f cloudflare/data/seed.sql ]]; then
             echo "::error::Release seed was not generated."
