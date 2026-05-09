@@ -41,6 +41,7 @@ jobs:
       GENERATED_WRANGLER_CONFIG: cloudflare/.generated/wrangler.deploy.jsonc
       RELEASE_MANIFEST: cloudflare/.generated/release-manifest.json
       RELEASE_DUCKDB: cloudflare/.generated/release-check.duckdb
+      REFRESH_REPORT: cloudflare/.generated/refresh-report.json
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
@@ -305,45 +306,79 @@ jobs:
           PY
 
       - name: Refresh catalog from MassTamilan
-        # Scheduled runs are *incremental* by design: the scraper compares
-        # each listing page against known_album_urls and stops as soon as
-        # one whole page is already known. Manual full refreshes only kick
-        # off when full_refresh=true, and even then they crawl with deeper
-        # delays + a 200-album rescrape cap so we don't hammer the source.
-        # The challenge-streak guard in scraper.py bails out of listing
-        # discovery as soon as Cloudflare flags the runner's IP.
+        # Use the runner's full CPU shape like the proven Sruthi workflow,
+        # but keep this repo's safer baseline bootstrap. If the upstream site
+        # blocks GitHub runner IPs, deploy the already-validated committed
+        # catalogue instead of failing the whole refresh/deploy pipeline.
         env:
-          # Listing pages get the heaviest CF flagging, so they get the
-          # longer delay; per-album detail fetches run a touch faster.
-          MASSTAMILAN_LISTING_DELAY: ${{ env.SRUTHI_FULL_REFRESH == 'true' && '2.5' || '1.8' }}
-          MASSTAMILAN_DETAIL_DELAY:  ${{ env.SRUTHI_FULL_REFRESH == 'true' && '1.8' || '1.2' }}
           MASSTAMILAN_MAX_CHALLENGE_STREAK: "4"
         run: |
           set -euo pipefail
+
+          workers="$(python - <<'PY'
+          import os
+          print(max(4, os.cpu_count() or 4))
+          PY
+          )"
+          batch_size=$(( workers * 4 ))
+
+          mode_label="INCREMENTAL"
+          args=(--workers "${workers}" --batch-size "${batch_size}" --report-path "${REFRESH_REPORT}")
           if [[ "${SRUTHI_FULL_REFRESH}" == "true" ]]; then
-            workers=2
             mode_label="FULL (manual)"
-          else
-            workers=3
-            mode_label="INCREMENTAL"
+            args+=(--full)
           fi
-          batch_size=$(( workers * 3 ))
-          args=(--workers "${workers}" --batch-size "${batch_size}")
-          if [[ "${SRUTHI_FULL_REFRESH}" == "true" ]]; then
-            # Cap the per-run rescrape so we never walk every one of the
-            # ~4 700 known albums from a CI runner. The scraper picks the
-            # most-needy 200 (missing URLs first, then stale metadata).
-            args+=(--full --max-rescrape 200)
-          fi
+
           echo "::group::Refresh configuration"
           echo "  mode                  = $mode_label"
           echo "  workers               = $workers"
           echo "  batch_size            = $batch_size"
-          echo "  listing delay (s)     = $MASSTAMILAN_LISTING_DELAY"
-          echo "  detail  delay (s)     = $MASSTAMILAN_DETAIL_DELAY"
           echo "  max challenge streak  = $MASSTAMILAN_MAX_CHALLENGE_STREAK"
+          echo "  report path           = $REFRESH_REPORT"
           echo "::endgroup::"
+
+          set +e
           python tools/masstamilan_refresh.py "${args[@]}"
+          refresh_status=$?
+          set -e
+
+          if [[ $refresh_status -eq 0 ]]; then
+            echo "Refresh completed successfully."
+            exit 0
+          fi
+
+          echo "::warning::MassTamilan refresh exited with status ${refresh_status}. Continuing with the bootstrapped committed catalogue; release validation will still enforce catalogue floors."
+          if [[ -f "${REFRESH_REPORT}" ]]; then
+            python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          report_path = Path(os.environ["REFRESH_REPORT"])
+          try:
+              report = json.loads(report_path.read_text(encoding="utf-8"))
+          except Exception as exc:
+              print(f"Could not read refresh report: {exc}")
+              raise SystemExit(0)
+
+          summary = report.get("summary") or {}
+          print("Refresh fallback summary")
+          print(json.dumps({
+              "status": report.get("status"),
+              "success": report.get("success"),
+              "errors": report.get("errors"),
+              "warnings": report.get("warnings"),
+              "listing_pages_scanned": summary.get("listing_pages_scanned"),
+              "movie_index_pages_scanned": summary.get("movie_index_pages_scanned"),
+              "albums_added": summary.get("albums_added"),
+              "albums_updated": summary.get("albums_updated"),
+              "challenged_pages": summary.get("challenged_pages"),
+              "failed_pages": summary.get("failed_pages"),
+              "challenged_albums": summary.get("challenged_albums"),
+              "failed_albums": summary.get("failed_albums"),
+          }, indent=2, sort_keys=True))
+          PY
+          fi
 
       - name: Validate refreshed local catalog files
         run: |
@@ -388,6 +423,7 @@ jobs:
           path: |
             cloudflare/data/seed.sql
             ${{ env.RELEASE_MANIFEST }}
+            ${{ env.REFRESH_REPORT }}
 
       - name: Import release into inactive D1 slot
         run: |
@@ -412,6 +448,7 @@ jobs:
             --json > /tmp/songs.json
           python - <<'PY'
           import json
+          import os
           from pathlib import Path
 
           def extract_count(path):
@@ -429,9 +466,22 @@ jobs:
 
           album_count = extract_count("/tmp/albums.json")
           song_count = extract_count("/tmp/songs.json")
-          if album_count <= 0 or song_count <= 0:
-            raise SystemExit(f"Remote D1 validation failed: albums={album_count}, songs={song_count}")
-          print({"albumCount": album_count, "songCount": song_count})
+          manifest = json.loads(Path(os.environ["RELEASE_MANIFEST"]).read_text(encoding="utf-8"))
+          expected = manifest.get("counts") or {}
+          expected_albums = int(expected.get("albums") or 0)
+          expected_songs = int(expected.get("songs") or 0)
+          if album_count != expected_albums or song_count != expected_songs:
+            raise SystemExit(
+              "Remote D1 validation failed: "
+              f"albums={album_count} expected={expected_albums}, "
+              f"songs={song_count} expected={expected_songs}"
+            )
+          print({
+            "albumCount": album_count,
+            "songCount": song_count,
+            "expectedAlbums": expected_albums,
+            "expectedSongs": expected_songs,
+          })
           PY
 
       - name: Deploy Worker after successful import and validation
