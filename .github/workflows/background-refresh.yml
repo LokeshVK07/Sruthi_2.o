@@ -321,8 +321,8 @@ jobs:
           )"
           batch_size=$(( workers * 4 ))
 
-          mode_label="FULL SOURCE CRAWL"
-          args=(--full --workers "${workers}" --batch-size "${batch_size}" --report-path "${REFRESH_REPORT}")
+          mode_label="FULL PAGEWISE SOURCE CRAWL"
+          args=(--full --mode pagewise --workers "${workers}" --batch-size "${batch_size}" --report-path "${REFRESH_REPORT}")
 
           echo "::group::Refresh configuration"
           echo "  mode                  = $mode_label"
