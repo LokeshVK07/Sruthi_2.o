@@ -82,6 +82,48 @@ def list_album_urls() -> list[str]:
     return [str(row[0]) for row in rows]
 
 
+def list_album_urls_for_rescrape(limit: int) -> list[str]:
+    """Return a prioritised, capped slice of album URLs to rescrape.
+
+    Priority order (highest first):
+        1. Albums where one or more songs are missing both 320 and 128 URLs
+           (broken/expired playable links — the most user-visible problem).
+        2. Albums with zero songs registered (likely a scrape that bailed
+           halfway).
+        3. Albums whose updated_at is oldest (oldest stale metadata).
+
+    Used by --max-rescrape so a manual full refresh doesn't try to walk
+    every single one of the ~4 700 known albums each run — pick the top N
+    that most need attention.
+    """
+    if limit <= 0:
+        return []
+    rows = get_connection().execute(
+        """
+        SELECT a.album_url
+        FROM albums a
+        LEFT JOIN (
+            SELECT album_url,
+                   COUNT(*) AS song_count,
+                   SUM(CASE
+                         WHEN coalesce(url_320kbps,'') = ''
+                          AND coalesce(url_128kbps,'') = '' THEN 1 ELSE 0 END
+                   ) AS missing_url_count
+            FROM songs
+            GROUP BY album_url
+        ) s ON s.album_url = a.album_url
+        ORDER BY
+            CASE WHEN coalesce(s.missing_url_count, 0) > 0 THEN 0 ELSE 1 END,
+            CASE WHEN coalesce(s.song_count, 0) = 0 THEN 0 ELSE 1 END,
+            datetime(a.updated_at) ASC,
+            a.album_name ASC
+        LIMIT ?
+        """,
+        [limit],
+    ).fetchall()
+    return [str(row[0]) for row in rows]
+
+
 def upsert_album_details(album: ScrapedAlbum) -> AlbumUpsertResult:
     conn = get_connection()
     album_url = canonicalize_url(album.album_url)

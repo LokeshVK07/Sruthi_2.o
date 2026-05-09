@@ -276,19 +276,73 @@ jobs:
           })
           PY
 
-      - name: Refresh catalog from MassTamilan
+      - name: Bootstrap working DB from committed catalogue
+        # The scraper's early-stop ("page is fully known → stop") only fires
+        # when it can compare the listing page against the existing
+        # known_album_urls in the SQLite. CI runs always start with the
+        # committed apps/api/data/melodify.sqlite3 — copy it to data/sruthi.db
+        # (the path tools/masstamilan_refresh.py writes to) so the scraper
+        # really sees the previous catalogue. We never start from an empty DB
+        # on a normal scheduled refresh: a fully-blocked scrape would then
+        # produce a near-empty catalogue and confuse the cliff-fall guard.
         run: |
           set -euo pipefail
-          workers="$(python - <<'PY'
-          import os
-          print(max(4, os.cpu_count() or 4))
+          src="apps/api/data/melodify.sqlite3"
+          dst="data/sruthi.db"
+          if [[ ! -f "$src" ]]; then
+            echo "::error::Committed baseline DB not found at $src. Refusing to start from an empty DB."
+            exit 1
+          fi
+          mkdir -p "$(dirname "$dst")"
+          cp "$src" "$dst"
+          python - <<'PY'
+          import sqlite3
+          conn = sqlite3.connect("file:data/sruthi.db?mode=ro", uri=True)
+          albums = conn.execute("SELECT COUNT(*) FROM albums").fetchone()[0]
+          songs = conn.execute("SELECT COUNT(*) FROM songs").fetchone()[0]
+          conn.close()
+          print(f"Bootstrapped working DB: {albums:,} albums, {songs:,} songs (the scraper will merge new/updated rows on top of these).")
           PY
-          )"
-          batch_size="$(( workers * 4 ))"
+
+      - name: Refresh catalog from MassTamilan
+        # Scheduled runs are *incremental* by design: the scraper compares
+        # each listing page against known_album_urls and stops as soon as
+        # one whole page is already known. Manual full refreshes only kick
+        # off when full_refresh=true, and even then they crawl with deeper
+        # delays + a 200-album rescrape cap so we don't hammer the source.
+        # The challenge-streak guard in scraper.py bails out of listing
+        # discovery as soon as Cloudflare flags the runner's IP.
+        env:
+          # Listing pages get the heaviest CF flagging, so they get the
+          # longer delay; per-album detail fetches run a touch faster.
+          MASSTAMILAN_LISTING_DELAY: ${{ env.SRUTHI_FULL_REFRESH == 'true' && '2.5' || '1.8' }}
+          MASSTAMILAN_DETAIL_DELAY:  ${{ env.SRUTHI_FULL_REFRESH == 'true' && '1.8' || '1.2' }}
+          MASSTAMILAN_MAX_CHALLENGE_STREAK: "4"
+        run: |
+          set -euo pipefail
+          if [[ "${SRUTHI_FULL_REFRESH}" == "true" ]]; then
+            workers=2
+            mode_label="FULL (manual)"
+          else
+            workers=3
+            mode_label="INCREMENTAL"
+          fi
+          batch_size=$(( workers * 3 ))
           args=(--workers "${workers}" --batch-size "${batch_size}")
           if [[ "${SRUTHI_FULL_REFRESH}" == "true" ]]; then
-            args+=(--full)
+            # Cap the per-run rescrape so we never walk every one of the
+            # ~4 700 known albums from a CI runner. The scraper picks the
+            # most-needy 200 (missing URLs first, then stale metadata).
+            args+=(--full --max-rescrape 200)
           fi
+          echo "::group::Refresh configuration"
+          echo "  mode                  = $mode_label"
+          echo "  workers               = $workers"
+          echo "  batch_size            = $batch_size"
+          echo "  listing delay (s)     = $MASSTAMILAN_LISTING_DELAY"
+          echo "  detail  delay (s)     = $MASSTAMILAN_DETAIL_DELAY"
+          echo "  max challenge streak  = $MASSTAMILAN_MAX_CHALLENGE_STREAK"
+          echo "::endgroup::"
           python tools/masstamilan_refresh.py "${args[@]}"
 
       - name: Validate refreshed local catalog files

@@ -184,7 +184,21 @@ def parse_args() -> argparse.Namespace:
         help="Which discovery mode to run.",
     )
     parser.add_argument("--full", action="store_true", help="Run a full page-wise scan and full movie-index scan.")
-    parser.add_argument("--delay", type=float, default=None, help="Delay between page fetches in seconds.")
+    parser.add_argument("--delay", type=float, default=None, help="(Deprecated) generic per-fetch delay; use --listing-delay/--detail-delay.")
+    parser.add_argument("--listing-delay", type=float, default=None, help="Polite delay (seconds) between listing-page fetches.")
+    parser.add_argument("--detail-delay", type=float, default=None, help="Polite delay (seconds) between album-detail fetches.")
+    parser.add_argument(
+        "--max-challenge-streak",
+        type=int,
+        default=None,
+        help="Stop the listing crawl after N consecutive challenged listing pages (0 disables).",
+    )
+    parser.add_argument(
+        "--max-rescrape",
+        type=int,
+        default=None,
+        help="Cap the per-run --full rescrape to this many albums, prioritised by missing URLs / staleness.",
+    )
     parser.add_argument("--skip-pagewise", action="store_true", help="Skip the paginated tamil-songs scan.")
     parser.add_argument("--skip-movie-index", action="store_true", help="Skip the movie-index scan.")
     parser.add_argument("--workers", type=int, default=4, help="Bounded worker count used for album detail parsing.")
@@ -199,10 +213,23 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
+    # Map the CLI knobs onto the env vars the scraper / config module reads.
+    # We only set env when the caller passed an explicit value, so anything
+    # already set via the workflow's `env:` block wins.
     if args.delay is not None:
         os.environ["MASSTAMILAN_DELAY_SECONDS"] = str(args.delay)
+    if args.listing_delay is not None:
+        os.environ["MASSTAMILAN_LISTING_DELAY"] = str(args.listing_delay)
+    if args.detail_delay is not None:
+        os.environ["MASSTAMILAN_DETAIL_DELAY"] = str(args.detail_delay)
+    if args.max_challenge_streak is not None:
+        os.environ["MASSTAMILAN_MAX_CHALLENGE_STREAK"] = str(args.max_challenge_streak)
 
     init_db()
+    # Apply the streak/delay overrides to the live scraper instance after
+    # init_db (which can be a no-op but is the canonical "ready" point).
+    if args.max_challenge_streak is not None:
+        site_scraper.max_listing_challenge_streak = max(0, args.max_challenge_streak)
 
     report = _new_report(args)
     report_path = args.report_path
@@ -287,11 +314,16 @@ def main() -> None:
                     print(f"WARN - {message}")
 
             if args.full:
-                print("INFO - [3/3] Re-scraping every known album in the catalog...")
+                cap = args.max_rescrape if args.max_rescrape and args.max_rescrape > 0 else None
+                if cap:
+                    print(f"INFO - [3/3] Re-scraping up to {cap} prioritised albums (capped) ...")
+                else:
+                    print("INFO - [3/3] Re-scraping every known album in the catalog...")
                 summary = site_scraper.rescrape_catalog(
                     batch_size=max(1, args.batch_size),
                     workers=max(1, args.workers),
                     report=report,
+                    max_count=cap,
                     dry_run=args.dry_run,
                 )
                 summaries.append(summary)

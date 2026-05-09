@@ -12,7 +12,17 @@ import cloudscraper
 from bs4 import BeautifulSoup
 from curl_cffi import requests as curl_requests
 
-from .config import MOVIE_INDEX_MAX_YEAR, MOVIE_INDEX_MIN_YEAR, SCRAPER_DELAY_SECONDS, SITE_BASE_URL, SITE_LIST_PATH, SITE_MAX_PAGES
+from .config import (
+    DETAIL_DELAY_SECONDS,
+    LISTING_DELAY_SECONDS,
+    MAX_CHALLENGE_STREAK,
+    MOVIE_INDEX_MAX_YEAR,
+    MOVIE_INDEX_MIN_YEAR,
+    SCRAPER_DELAY_SECONDS,
+    SITE_BASE_URL,
+    SITE_LIST_PATH,
+    SITE_MAX_PAGES,
+)
 from .repository import create_scrape_run, finish_scrape_run, known_album_urls, list_album_urls, make_album_id, upsert_album_details
 from .schemas import ScrapedAlbum, ScrapedSong, ScrapeSummary
 from .utils import canonicalize_url
@@ -23,6 +33,17 @@ class ChallengeError(Exception):
 
 
 class FetchError(Exception):
+    pass
+
+
+class ChallengeStreakAborted(Exception):
+    """Raised when consecutive listing challenges exceed the configured cap.
+
+    Distinct from ChallengeError so the scrape loops can recognise the
+    "give up gracefully" signal vs a normal per-page challenge that the
+    loop should log and skip past.
+    """
+
     pass
 
 
@@ -98,6 +119,13 @@ class SiteScraper:
     def __init__(self) -> None:
         self.client_local = threading.local()
         self.refresh_locks: dict[str, threading.Lock] = {}
+        # Listing-page challenge streak. Reset on every successful fetch_html;
+        # incremented when fetch_html exhausts retries on a listing-kind URL.
+        # `_check_listing_streak` is called by the listing/index loops after
+        # they handle a ChallengeError so they can break gracefully instead
+        # of walking dozens more guaranteed-to-be-blocked pages.
+        self.listing_challenge_streak = 0
+        self.max_listing_challenge_streak = MAX_CHALLENGE_STREAK
 
     def _clients(self) -> tuple[Any, Any]:
         scraper = getattr(self.client_local, "scraper", None)
@@ -155,13 +183,40 @@ class SiteScraper:
             raise ChallengeError(f"Challenge page detected for {url} ({'; '.join(errors)})")
         raise FetchError("; ".join(errors) if errors else f"Failed to fetch {url}")
 
-    def fetch_html(self, url: str, referer: str | None = None, *, max_attempts: int = 3, polite_delay: bool = True) -> str:
+    def fetch_html(
+        self,
+        url: str,
+        referer: str | None = None,
+        *,
+        max_attempts: int = 3,
+        polite_delay: bool = True,
+        kind: str = "detail",
+    ) -> str:
+        """Fetch `url` with retries.
+
+        `kind` selects between LISTING_DELAY_SECONDS and DETAIL_DELAY_SECONDS
+        for the post-success polite delay. It also drives the listing-only
+        challenge streak counter — listing pages are the ones the workflow
+        should bail out on if Cloudflare's flagging the whole crawl.
+        """
+        listing_kind = kind == "listing"
+        delay = LISTING_DELAY_SECONDS if listing_kind else DETAIL_DELAY_SECONDS
         last_error: Exception | None = None
         for attempt in range(1, max_attempts + 1):
             try:
                 html = self._request_once(url, referer=referer)
-                if polite_delay and SCRAPER_DELAY_SECONDS > 0:
-                    time.sleep(SCRAPER_DELAY_SECONDS)
+                if polite_delay and delay > 0:
+                    # Small jitter (≤ 25 % of the delay, max 0.4 s) so we
+                    # don't end up scraping in a perfectly periodic pattern.
+                    time.sleep(delay + random.uniform(0, min(0.4, delay * 0.25)))
+                # Any successful fetch (listing OR detail) clears the streak —
+                # if even one page came through, the IP isn't fully blocked.
+                if self.listing_challenge_streak:
+                    print(
+                        f"[scrape] challenge streak cleared after "
+                        f"{self.listing_challenge_streak} block(s)"
+                    )
+                    self.listing_challenge_streak = 0
                 return html
             except ChallengeError as exc:
                 last_error = exc
@@ -178,9 +233,19 @@ class SiteScraper:
                 if attempt >= max_attempts:
                     break
                 self._sleep_with_backoff(attempt, base=1.5, ceiling=12.0)
+
+        if isinstance(last_error, ChallengeError) and listing_kind:
+            self.listing_challenge_streak += 1
+
         if last_error is None:
             raise FetchError(f"Failed to fetch {url}")
         raise last_error
+
+    def _check_listing_streak(self) -> bool:
+        """Return True if the listing crawl should stop now."""
+        if self.max_listing_challenge_streak <= 0:
+            return False
+        return self.listing_challenge_streak >= self.max_listing_challenge_streak
 
     def _record_issue(
         self,
@@ -224,7 +289,7 @@ class SiteScraper:
 
     def discover_listing_page(self, page_number: int) -> tuple[list[str], int, bool]:
         url = f"{SITE_BASE_URL}{SITE_LIST_PATH}?page={page_number}"
-        html = self.fetch_html(url)
+        html = self.fetch_html(url, kind="listing")
         soup = BeautifulSoup(html, "lxml")
         urls = self._album_urls_from_soup(soup, url)
         max_page = page_number
@@ -281,7 +346,7 @@ class SiteScraper:
         years = [f"{SITE_BASE_URL}/browse-by-year/{year}" for year in range(MOVIE_INDEX_MAX_YEAR, MOVIE_INDEX_MIN_YEAR - 1, -1)]
 
         try:
-            html = self.fetch_html(movie_index_url)
+            html = self.fetch_html(movie_index_url, kind="listing")
             soup = BeautifulSoup(html, "lxml")
             for anchor in soup.select("a[href]"):
                 href = anchor.get("href", "")
@@ -310,7 +375,7 @@ class SiteScraper:
 
     def discover_index_section_page(self, section_url: str, page_number: int = 1) -> tuple[list[str], int]:
         page_url = self._section_page_url(section_url, page_number)
-        html = self.fetch_html(page_url, referer=f"{SITE_BASE_URL}/movie-index")
+        html = self.fetch_html(page_url, referer=f"{SITE_BASE_URL}/movie-index", kind="listing")
         soup = BeautifulSoup(html, "lxml")
         urls = self._album_urls_from_soup(soup, page_url)
         max_page = page_number
@@ -642,9 +707,18 @@ class SiteScraper:
         workers: int = 4,
         report: dict[str, Any] | None = None,
         dry_run: bool = False,
+        max_count: int | None = None,
     ) -> ScrapeSummary:
         run_id = create_scrape_run()
-        album_urls = list_album_urls()
+        if max_count and max_count > 0:
+            from .repository import list_album_urls_for_rescrape
+            album_urls = list_album_urls_for_rescrape(max_count)
+            if not album_urls:
+                # Fallback: no metadata to prioritise on (fresh DB?). Use the
+                # oldest-first ordering capped at max_count.
+                album_urls = list_album_urls()[:max_count]
+        else:
+            album_urls = list_album_urls()
         albums_new = 0
         albums_updated = 0
         albums_failed = 0
@@ -659,7 +733,8 @@ class SiteScraper:
             if phase_report is not None:
                 phase_report["albums_targeted"] = total
 
-            print(f"INFO - Catalog rescrape: refreshing {total} known albums")
+            cap_note = f" (capped at {max_count})" if max_count and max_count > 0 else ""
+            print(f"INFO - Catalog rescrape: refreshing {total} known albums{cap_note}")
             counts = self._process_album_urls(
                 album_urls,
                 phase="catalog_rescrape",
@@ -733,6 +808,17 @@ class SiteScraper:
                 except ChallengeError as exc:
                     self._record_issue(report, "challenged_pages", phase="listing", url=page_url, reason=str(exc), page=page_number)
                     print(f"[scrape:listing] page challenged page={page_number}: {exc}")
+                    if self._check_listing_streak():
+                        message = (
+                            f"Listing crawl aborted: {self.listing_challenge_streak} "
+                            f"consecutive challenged pages (limit "
+                            f"{self.max_listing_challenge_streak})"
+                        )
+                        print(f"[scrape:listing] {message}")
+                        if report is not None:
+                            report.setdefault("warnings", []).append(message)
+                        status = "warning"
+                        break
                     page_number += 1
                     continue
                 except Exception as exc:
@@ -828,6 +914,7 @@ class SiteScraper:
         status = "success"
         phase_report = self._phase_report(report, "movie_index")
         reached_any_page = False
+        challenge_aborted = False
         try:
             sections = self.discover_movie_index_sections(report=report)
             targets: list[tuple[str, str]] = [("landing", url) for url in sections["landing"]]
@@ -837,6 +924,8 @@ class SiteScraper:
                 targets.extend(("year", url) for url in sections["years"])
 
             for section_type, section_url in targets:
+                if challenge_aborted:
+                    break
                 page_number = 1
                 discovered_max_page = 1
                 section_label = urlparse(section_url).path
@@ -859,6 +948,19 @@ class SiteScraper:
                             section=section_label,
                         )
                         print(f"[scrape:index] section challenged {section_url} page={page_number}: {exc}")
+                        if self._check_listing_streak():
+                            message = (
+                                f"Movie-index crawl aborted: "
+                                f"{self.listing_challenge_streak} consecutive "
+                                f"challenged pages (limit "
+                                f"{self.max_listing_challenge_streak})"
+                            )
+                            print(f"[scrape:index] {message}")
+                            if report is not None:
+                                report.setdefault("warnings", []).append(message)
+                            status = "warning"
+                            challenge_aborted = True
+                            break
                         if page_number >= discovered_max_page:
                             break
                         page_number += 1

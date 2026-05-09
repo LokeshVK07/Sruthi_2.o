@@ -36,7 +36,19 @@ WARMUP_BATCH_SIZE = int(os.getenv("WARMUP_BATCH_SIZE", "48"))
 SITE_BASE_URL = os.getenv("MASSTAMILAN_BASE_URL", "https://www.masstamilan.dev")
 SITE_LIST_PATH = os.getenv("MASSTAMILAN_LIST_PATH", "/tamil-songs")
 SITE_MAX_PAGES = int(os.getenv("MASSTAMILAN_MAX_PAGES", "481"))
+# Generic per-fetch polite delay; older callers use this. New code uses the
+# listing/detail-specific delays below — when those env vars aren't set,
+# this value is the fallback.
 SCRAPER_DELAY_SECONDS = float(os.getenv("MASSTAMILAN_DELAY_SECONDS", "0.2"))
+# Two-track polite delay so listing pages (the ones Cloudflare flags hardest
+# from CI runners) can crawl slower than per-album detail fetches without
+# throttling the whole refresh in lockstep. Workflow defaults override these.
+LISTING_DELAY_SECONDS = float(os.getenv("MASSTAMILAN_LISTING_DELAY", str(SCRAPER_DELAY_SECONDS)))
+DETAIL_DELAY_SECONDS = float(os.getenv("MASSTAMILAN_DETAIL_DELAY", str(SCRAPER_DELAY_SECONDS)))
+# Stop the listing crawl after this many consecutive challenged listing
+# fetches. Prevents the refresh from walking pages 40, 50, 70 once Cloudflare
+# clearly flagged the runner's IP. Set to 0 to disable.
+MAX_CHALLENGE_STREAK = int(os.getenv("MASSTAMILAN_MAX_CHALLENGE_STREAK", "4"))
 MOVIE_INDEX_MIN_YEAR = int(os.getenv("MASSTAMILAN_MIN_YEAR", "1930"))
 MOVIE_INDEX_MAX_YEAR = int(os.getenv("MASSTAMILAN_MAX_YEAR", str(datetime.utcnow().year)))
 SCRAPER_PLAYWRIGHT_ENABLED = os.getenv("MASSTAMILAN_USE_PLAYWRIGHT", "false").strip().lower() in {"1", "true", "yes", "on"}
