@@ -49,6 +49,10 @@ DETAIL_DELAY_SECONDS = float(os.getenv("MASSTAMILAN_DETAIL_DELAY", str(SCRAPER_D
 # fetches. Prevents the refresh from walking pages 40, 50, 70 once Cloudflare
 # clearly flagged the runner's IP. Set to 0 to disable.
 MAX_CHALLENGE_STREAK = int(os.getenv("MASSTAMILAN_MAX_CHALLENGE_STREAK", "4"))
+SCRAPER_MAX_ATTEMPTS = max(1, int(os.getenv("MASSTAMILAN_MAX_ATTEMPTS", "3")))
+SCRAPER_RETRY_BASE_DELAY_SECONDS = float(os.getenv("MASSTAMILAN_RETRY_BASE_DELAY", "1.5"))
+SCRAPER_RETRY_MAX_DELAY_SECONDS = float(os.getenv("MASSTAMILAN_RETRY_MAX_DELAY", "20"))
+SCRAPER_CHALLENGE_COOLDOWN_SECONDS = float(os.getenv("MASSTAMILAN_CHALLENGE_COOLDOWN", "0"))
 MOVIE_INDEX_MIN_YEAR = int(os.getenv("MASSTAMILAN_MIN_YEAR", "1930"))
 MOVIE_INDEX_MAX_YEAR = int(os.getenv("MASSTAMILAN_MAX_YEAR", str(datetime.utcnow().year)))
 SCRAPER_PLAYWRIGHT_ENABLED = os.getenv("MASSTAMILAN_USE_PLAYWRIGHT", "false").strip().lower() in {"1", "true", "yes", "on"}

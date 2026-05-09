@@ -310,16 +310,22 @@ jobs:
         # If the upstream site blocks GitHub runner IPs, restore the baseline
         # DB and let release validation deploy that known-good catalogue.
         env:
+          MASSTAMILAN_LISTING_DELAY: "8"
+          MASSTAMILAN_DETAIL_DELAY: "3"
+          MASSTAMILAN_MAX_ATTEMPTS: "3"
+          MASSTAMILAN_RETRY_BASE_DELAY: "8"
+          MASSTAMILAN_RETRY_MAX_DELAY: "45"
+          MASSTAMILAN_CHALLENGE_COOLDOWN: "45"
           MASSTAMILAN_MAX_CHALLENGE_STREAK: "4"
         run: |
           set -euo pipefail
 
-          workers="$(python - <<'PY'
-          import os
-          print(max(4, os.cpu_count() or 4))
-          PY
-          )"
-          batch_size=$(( workers * 4 ))
+          if [[ "${SRUTHI_FULL_REFRESH}" == "true" ]]; then
+            workers=2
+          else
+            workers=1
+          fi
+          batch_size=$(( workers * 3 ))
 
           mode_label="FULL PAGEWISE SOURCE CRAWL"
           args=(--full --mode pagewise --workers "${workers}" --batch-size "${batch_size}" --report-path "${REFRESH_REPORT}")
@@ -328,6 +334,12 @@ jobs:
           echo "  mode                  = $mode_label"
           echo "  workers               = $workers"
           echo "  batch_size            = $batch_size"
+          echo "  listing delay (s)     = $MASSTAMILAN_LISTING_DELAY"
+          echo "  detail delay (s)      = $MASSTAMILAN_DETAIL_DELAY"
+          echo "  max attempts          = $MASSTAMILAN_MAX_ATTEMPTS"
+          echo "  retry base delay (s)  = $MASSTAMILAN_RETRY_BASE_DELAY"
+          echo "  retry max delay (s)   = $MASSTAMILAN_RETRY_MAX_DELAY"
+          echo "  challenge cooldown(s) = $MASSTAMILAN_CHALLENGE_COOLDOWN"
           echo "  max challenge streak  = $MASSTAMILAN_MAX_CHALLENGE_STREAK"
           echo "  report path           = $REFRESH_REPORT"
           echo "::endgroup::"

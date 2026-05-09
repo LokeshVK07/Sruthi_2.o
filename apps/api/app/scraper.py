@@ -18,7 +18,11 @@ from .config import (
     MAX_CHALLENGE_STREAK,
     MOVIE_INDEX_MAX_YEAR,
     MOVIE_INDEX_MIN_YEAR,
+    SCRAPER_CHALLENGE_COOLDOWN_SECONDS,
     SCRAPER_DELAY_SECONDS,
+    SCRAPER_MAX_ATTEMPTS,
+    SCRAPER_RETRY_BASE_DELAY_SECONDS,
+    SCRAPER_RETRY_MAX_DELAY_SECONDS,
     SITE_BASE_URL,
     SITE_LIST_PATH,
     SITE_MAX_PAGES,
@@ -126,6 +130,8 @@ class SiteScraper:
         # of walking dozens more guaranteed-to-be-blocked pages.
         self.listing_challenge_streak = 0
         self.max_listing_challenge_streak = MAX_CHALLENGE_STREAK
+        self.cooldown_lock = threading.Lock()
+        self.cooldown_until = 0.0
 
     def _clients(self) -> tuple[Any, Any]:
         scraper = getattr(self.client_local, "scraper", None)
@@ -140,7 +146,32 @@ class SiteScraper:
             self.client_local.curl = curl
         return scraper, curl
 
-    def _sleep_with_backoff(self, attempt: int, base: float = 1.5, ceiling: float = 20.0) -> None:
+    def _wait_for_cooldown(self) -> None:
+        with self.cooldown_lock:
+            remaining = self.cooldown_until - time.monotonic()
+        if remaining <= 0:
+            return
+        print(f"[scrape] shared cooldown active for {remaining:.1f}s")
+        time.sleep(remaining)
+
+    def _trigger_cooldown(self, *, kind: str, attempt: int, reason: str) -> None:
+        if SCRAPER_CHALLENGE_COOLDOWN_SECONDS <= 0:
+            return
+        cooldown = SCRAPER_CHALLENGE_COOLDOWN_SECONDS
+        cooldown += random.uniform(0, min(5.0, cooldown * 0.1))
+        until = time.monotonic() + cooldown
+        with self.cooldown_lock:
+            if until <= self.cooldown_until:
+                return
+            self.cooldown_until = until
+        print(f"[scrape] upstream limiter hit during {kind}; cooling down for {cooldown:.1f}s ({reason})")
+
+    def _sleep_with_backoff(
+        self,
+        attempt: int,
+        base: float = SCRAPER_RETRY_BASE_DELAY_SECONDS,
+        ceiling: float = SCRAPER_RETRY_MAX_DELAY_SECONDS,
+    ) -> None:
         delay = min(ceiling, base * (2 ** max(0, attempt - 1)))
         delay += random.uniform(0, min(1.0, delay / 4))
         time.sleep(delay)
@@ -188,7 +219,7 @@ class SiteScraper:
         url: str,
         referer: str | None = None,
         *,
-        max_attempts: int = 3,
+        max_attempts: int = SCRAPER_MAX_ATTEMPTS,
         polite_delay: bool = True,
         kind: str = "detail",
     ) -> str:
@@ -204,6 +235,7 @@ class SiteScraper:
         last_error: Exception | None = None
         for attempt in range(1, max_attempts + 1):
             try:
+                self._wait_for_cooldown()
                 html = self._request_once(url, referer=referer)
                 if polite_delay and delay > 0:
                     # Small jitter (≤ 25 % of the delay, max 0.4 s) so we
@@ -220,9 +252,10 @@ class SiteScraper:
                 return html
             except ChallengeError as exc:
                 last_error = exc
-                if attempt >= min(max_attempts, 2):
+                self._trigger_cooldown(kind=kind, attempt=attempt, reason=str(exc))
+                if attempt >= max_attempts:
                     break
-                self._sleep_with_backoff(attempt, base=4.0, ceiling=10.0)
+                self._sleep_with_backoff(attempt, base=max(4.0, SCRAPER_RETRY_BASE_DELAY_SECONDS), ceiling=SCRAPER_RETRY_MAX_DELAY_SECONDS)
             except FetchError as exc:
                 last_error = exc
                 if attempt >= max_attempts:
