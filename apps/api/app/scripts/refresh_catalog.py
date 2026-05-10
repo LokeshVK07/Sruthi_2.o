@@ -13,6 +13,7 @@ from app.config import DATABASE_PATH, SITE_MAX_PAGES
 from app.db import init_db
 from app.schemas import ScrapeSummary
 from app.scraper import site_scraper
+import app.scraper as scraper_module
 
 
 def iso_now() -> str:
@@ -111,10 +112,20 @@ def _new_report(args: argparse.Namespace) -> dict[str, Any]:
             "delay": args.delay,
             "listingDelay": args.listing_delay,
             "detailDelay": args.detail_delay,
+            "pageDelay": args.page_delay,
+            "albumDelay": args.album_delay,
             "jitter": args.jitter,
             "limiterCooldown": args.limiter_cooldown,
             "maxLimiterStreak": args.max_limiter_streak or args.max_challenge_streak,
             "abortOnPage1Limited": args.abort_on_page1_limited,
+            "retryCount": args.retry_count,
+            "retryBaseDelay": args.retry_base_delay,
+            "retryMaxDelay": args.retry_max_delay,
+            "stopAfterKnownPages": args.stop_after_known_pages,
+            "movieIndexStopAfterKnownPages": args.movie_index_stop_after_known_pages,
+            "origin": args.origin,
+            "listingPath": args.listing_path,
+            "movieIndexPath": args.movie_index_path,
             "retryFailedOnly": args.retry_failed_only,
             "dryRun": args.dry_run,
         },
@@ -216,8 +227,24 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--delay", type=float, default=None, help="(Deprecated) generic per-fetch delay; use --listing-delay/--detail-delay.")
     parser.add_argument("--listing-delay", type=float, default=None, help="Polite delay (seconds) between listing-page fetches.")
     parser.add_argument("--detail-delay", type=float, default=None, help="Polite delay (seconds) between album-detail fetches.")
+    parser.add_argument("--page-delay", type=float, default=None, help="isaibox-compatible alias for --listing-delay.")
+    parser.add_argument("--album-delay", type=float, default=None, help="isaibox-compatible alias for --detail-delay.")
     parser.add_argument("--jitter", type=float, default=None, help="Maximum random jitter (seconds) added to scraper sleeps.")
     parser.add_argument("--limiter-cooldown", type=float, default=None, help="Base shared cooldown after an upstream limiter response.")
+    parser.add_argument("--retry-count", type=int, default=None, help="Maximum HTTP attempts per source page.")
+    parser.add_argument("--retry-base-delay", type=float, default=None, help="Base retry/backoff delay in seconds.")
+    parser.add_argument("--retry-max-delay", type=float, default=None, help="Maximum retry/backoff delay in seconds.")
+    parser.add_argument("--stop-after-known-pages", type=int, default=None, help="Incremental listing crawl stops after N consecutive known pages.")
+    parser.add_argument(
+        "--movie-index-stop-after-known-pages",
+        type=int,
+        default=None,
+        help="Incremental movie-index crawl stops after N consecutive known pages.",
+    )
+    parser.add_argument("--origin", default=None, help="Override source origin, e.g. https://www.masstamilan.dev.")
+    parser.add_argument("--listing-path", default=None, help="Override listing path, e.g. /tamil-songs.")
+    parser.add_argument("--movie-index-path", default=None, help="Override movie-index path, e.g. /movie-index.")
+    parser.add_argument("--include-tag-index", action="store_true", help="Accepted for isaibox compatibility; tag sections are already included.")
     parser.add_argument("--abort-on-page1-limited", action=argparse.BooleanOptionalAction, default=None, help="Abort safely if listing page 1 remains limited after retries.")
     parser.add_argument(
         "--max-challenge-streak",
@@ -252,6 +279,11 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
+    if args.page_delay is not None and args.listing_delay is None:
+        args.listing_delay = args.page_delay
+    if args.album_delay is not None and args.detail_delay is None:
+        args.detail_delay = args.album_delay
+
     # Map the CLI knobs onto the env vars the scraper / config module reads.
     # We only set env when the caller passed an explicit value, so anything
     # already set via the workflow's `env:` block wins.
@@ -265,11 +297,26 @@ def main() -> None:
         os.environ["SCRAPER_JITTER_SECONDS"] = str(args.jitter)
     if args.limiter_cooldown is not None:
         os.environ["SCRAPER_LIMITER_COOLDOWN_SECONDS"] = str(args.limiter_cooldown)
+    if args.retry_count is not None:
+        os.environ["SCRAPER_MAX_ATTEMPTS"] = str(args.retry_count)
+    if args.retry_base_delay is not None:
+        os.environ["SCRAPER_RETRY_BASE_DELAY_SECONDS"] = str(args.retry_base_delay)
+    if args.retry_max_delay is not None:
+        os.environ["SCRAPER_RETRY_MAX_DELAY_SECONDS"] = str(args.retry_max_delay)
+    if args.stop_after_known_pages is not None:
+        os.environ["SCRAPER_STOP_AFTER_KNOWN_PAGES"] = str(args.stop_after_known_pages)
+    if args.movie_index_stop_after_known_pages is not None:
+        os.environ["SCRAPER_MOVIE_INDEX_STOP_AFTER_KNOWN_PAGES"] = str(args.movie_index_stop_after_known_pages)
     limiter_streak = args.max_limiter_streak if args.max_limiter_streak is not None else args.max_challenge_streak
     if limiter_streak is not None:
         os.environ["MASSTAMILAN_MAX_CHALLENGE_STREAK"] = str(limiter_streak)
     if args.abort_on_page1_limited is not None:
         os.environ["SCRAPER_ABORT_ON_PAGE1_LIMITED"] = "true" if args.abort_on_page1_limited else "false"
+    if args.origin:
+        scraper_module.SITE_BASE_URL = args.origin.rstrip("/")
+    if args.listing_path:
+        listing_path = args.listing_path if args.listing_path.startswith("/") else f"/{args.listing_path}"
+        scraper_module.SITE_LIST_PATH = listing_path
 
     init_db()
     # Apply the streak/delay overrides to the live scraper instance after
@@ -282,6 +329,18 @@ def main() -> None:
         site_scraper.jitter_seconds = max(0.0, args.jitter)
     if args.limiter_cooldown is not None:
         site_scraper.limiter_cooldown_seconds = max(0.0, args.limiter_cooldown)
+    if args.retry_count is not None:
+        site_scraper.max_attempts = max(1, args.retry_count)
+    if args.retry_base_delay is not None:
+        site_scraper.retry_base_delay_seconds = max(0.0, args.retry_base_delay)
+    if args.retry_max_delay is not None:
+        site_scraper.retry_max_delay_seconds = max(0.1, args.retry_max_delay)
+    if args.stop_after_known_pages is not None:
+        site_scraper.stop_after_known_pages = max(1, args.stop_after_known_pages)
+    if args.movie_index_stop_after_known_pages is not None:
+        site_scraper.movie_index_stop_after_known_pages = max(1, args.movie_index_stop_after_known_pages)
+    if args.movie_index_path:
+        site_scraper.movie_index_path = args.movie_index_path if args.movie_index_path.startswith("/") else f"/{args.movie_index_path}"
     if limiter_streak is not None:
         site_scraper.max_listing_challenge_streak = max(0, limiter_streak)
     if args.abort_on_page1_limited is not None:

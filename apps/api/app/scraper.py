@@ -24,8 +24,10 @@ from .config import (
     SCRAPER_JITTER_SECONDS,
     SCRAPER_LIMITER_MAX_COOLDOWN_SECONDS,
     SCRAPER_MAX_ATTEMPTS,
+    SCRAPER_MOVIE_INDEX_STOP_AFTER_KNOWN_PAGES,
     SCRAPER_RETRY_BASE_DELAY_SECONDS,
     SCRAPER_RETRY_MAX_DELAY_SECONDS,
+    SCRAPER_STOP_AFTER_KNOWN_PAGES,
     SITE_BASE_URL,
     SITE_LIST_PATH,
     SITE_MAX_PAGES,
@@ -162,6 +164,9 @@ class SiteScraper:
         self.abort_on_page1_limited = SCRAPER_ABORT_ON_PAGE1_LIMITED
         self.listing_delay_seconds = LISTING_DELAY_SECONDS
         self.detail_delay_seconds = DETAIL_DELAY_SECONDS
+        self.stop_after_known_pages = SCRAPER_STOP_AFTER_KNOWN_PAGES
+        self.movie_index_stop_after_known_pages = SCRAPER_MOVIE_INDEX_STOP_AFTER_KNOWN_PAGES
+        self.movie_index_path = "/movie-index"
         self.jitter_seconds = SCRAPER_JITTER_SECONDS
         self.max_attempts = SCRAPER_MAX_ATTEMPTS
         self.retry_base_delay_seconds = SCRAPER_RETRY_BASE_DELAY_SECONDS
@@ -464,7 +469,7 @@ class SiteScraper:
         return urls
 
     def discover_movie_index_sections(self, report: dict[str, Any] | None = None) -> dict[str, list[str]]:
-        movie_index_url = f"{SITE_BASE_URL}/movie-index"
+        movie_index_url = f"{SITE_BASE_URL}{self.movie_index_path}"
         alphabet = [f"{SITE_BASE_URL}/tag/0-9"]
         alphabet.extend(f"{SITE_BASE_URL}/tag/{character}" for character in "ABCDEFGHIJKLMNOPQRSTUVWXYZ")
         years = [f"{SITE_BASE_URL}/browse-by-year/{year}" for year in range(MOVIE_INDEX_MAX_YEAR, MOVIE_INDEX_MIN_YEAR - 1, -1)]
@@ -499,7 +504,7 @@ class SiteScraper:
 
     def discover_index_section_page(self, section_url: str, page_number: int = 1) -> tuple[list[str], int]:
         page_url = self._section_page_url(section_url, page_number)
-        html = self.fetch_html(page_url, referer=f"{SITE_BASE_URL}/movie-index", kind="listing")
+        html = self.fetch_html(page_url, referer=f"{SITE_BASE_URL}{self.movie_index_path}", kind="listing")
         soup = BeautifulSoup(html, "lxml")
         urls = self._album_urls_from_soup(soup, page_url)
         max_page = page_number
@@ -920,6 +925,7 @@ class SiteScraper:
         status = "success"
         phase_report = self._phase_report(report, "pagewise")
         consecutive_empty_pages = 0
+        consecutive_known_pages = 0
         page_number = page_from
         discovered_last_page = configured_last_page
         reached_any_page = False
@@ -972,12 +978,21 @@ class SiteScraper:
                 consecutive_empty_pages = 0
                 pages_scraped += 1
                 known = known_album_urls(urls)
-                print(f"INFO - Listing page {page_number}: {len(urls)} albums, {max(len(urls) - len(known), 0)} new")
+                new_on_page = max(len(urls) - len(known), 0)
+                print(f"INFO - Listing page {page_number}: {len(urls)} albums, {new_on_page} new")
                 if phase_report is not None:
                     phase_report["pages_scanned"] = phase_report.get("pages_scanned", 0) + 1
-                if incremental and not full_scan and len(urls) == len(known):
-                    print(f"[scrape:listing] stopping early at page {page_number} because the full page is already known")
-                    break
+                if incremental and not full_scan:
+                    if new_on_page == 0:
+                        consecutive_known_pages += 1
+                    else:
+                        consecutive_known_pages = 0
+                    if consecutive_known_pages >= max(1, self.stop_after_known_pages):
+                        print(
+                            "[scrape:listing] stopping early after "
+                            f"{consecutive_known_pages} consecutive known page(s)"
+                        )
+                        break
 
                 process_urls = urls if full_scan else [url for url in urls if canonicalize_url(url) not in known]
                 counts = self._process_album_urls(
@@ -1049,6 +1064,7 @@ class SiteScraper:
         phase_report = self._phase_report(report, "movie_index")
         reached_any_page = False
         challenge_aborted = False
+        consecutive_known_pages = 0
         try:
             sections = self.discover_movie_index_sections(report=report)
             targets: list[tuple[str, str]] = [("landing", url) for url in sections["landing"]]
@@ -1129,18 +1145,28 @@ class SiteScraper:
                         }[section_type]
                         phase_report[page_key] = phase_report.get(page_key, 0) + 1
 
+                    new_on_page = max(len(urls) - len(known), 0)
                     if section_type == "landing":
-                        print(f"INFO - Movie index page {page_number}: {len(urls)} albums, {max(len(urls) - len(known), 0)} new")
+                        print(f"INFO - Movie index page {page_number}: {len(urls)} albums, {new_on_page} new")
                     elif section_type == "section":
                         section_name = section_label.rsplit("/", 1)[-1]
-                        print(f"INFO - Section {section_name} page {page_number}: {len(urls)} albums, {max(len(urls) - len(known), 0)} new")
+                        print(f"INFO - Section {section_name} page {page_number}: {len(urls)} albums, {new_on_page} new")
                     else:
                         year_name = section_label.rsplit("/", 1)[-1]
-                        print(f"INFO - Year {year_name} page {page_number}: {len(urls)} albums, {max(len(urls) - len(known), 0)} new")
+                        print(f"INFO - Year {year_name} page {page_number}: {len(urls)} albums, {new_on_page} new")
 
-                    if incremental and not full_scan and len(urls) == len(known):
-                        print(f"[scrape:index] stopping early for {section_label} page={page_number} because the full page is already known")
-                        break
+                    if incremental and not full_scan:
+                        if new_on_page == 0:
+                            consecutive_known_pages += 1
+                        else:
+                            consecutive_known_pages = 0
+                        if consecutive_known_pages >= max(1, self.movie_index_stop_after_known_pages):
+                            print(
+                                "[scrape:index] movie-index crawl stopped after "
+                                f"{consecutive_known_pages} consecutive pages with no new albums."
+                            )
+                            challenge_aborted = True
+                            break
 
                     process_urls = urls if full_scan else [url for url in urls if canonicalize_url(url) not in known]
                     counts = self._process_album_urls(

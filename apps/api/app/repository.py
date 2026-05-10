@@ -459,6 +459,14 @@ def get_frontend_song(song_id: str, user_id: str = DEFAULT_USER_ID) -> FrontendS
     return _map_public_song(row, _favorite_song_ids(user_id))
 
 
+def get_frontend_songs(song_ids: list[str], user_id: str = DEFAULT_USER_ID) -> list[FrontendSong]:
+    ensure_database_ready()
+    ordered_ids = [str(song_id) for song_id in song_ids if str(song_id).strip()]
+    rows_by_id = _song_rows_by_ids(ordered_ids)
+    favorite_ids = _favorite_song_ids(user_id)
+    return [_map_public_song(rows_by_id[song_id], favorite_ids) for song_id in ordered_ids if song_id in rows_by_id]
+
+
 def search_songs(query: str, limit: int = 100) -> list[PublicSong]:
     normalized = query.strip().lower()
     q = f"%{normalized}%"

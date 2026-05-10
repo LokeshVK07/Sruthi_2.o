@@ -26,6 +26,7 @@ from .repository import (
     count_songs,
     get_album_by_id,
     get_frontend_song,
+    get_frontend_songs,
     get_song,
     list_albums,
     list_composers,
@@ -235,28 +236,90 @@ async def warmup(request: Request):
     return {"ok": True, "queued": queued}
 
 
+@app.post("/api/media/reindex")
+def media_reindex():
+    init_db()
+    return {
+        "summary": {
+            "albumCount": count_albums(),
+            "songCount": count_songs(),
+        },
+        "refresh": get_refresh_status(),
+    }
+
+
 @app.post("/api/prefetch")
 async def prefetch(request: Request):
     payload = await request.json()
-    song_ids = payload.get("songIds") or []
+    song_ids = payload.get("songIds") or payload.get("ids") or []
     if not isinstance(song_ids, list):
-        raise HTTPException(400, "songIds must be a list")
-    return {"queued": queue_prefetch([str(song_id) for song_id in song_ids], STREAM_PREFETCH_LIMIT)}
+        raise HTTPException(400, "songIds/ids must be a list")
+    queued = queue_prefetch([str(song_id) for song_id in song_ids], STREAM_PREFETCH_LIMIT)
+    return {"ok": True, "queued": queued}
+
+
+@app.post("/api/songs-batch")
+async def songs_batch(request: Request):
+    payload = await request.json()
+    song_ids = payload.get("ids") or payload.get("songIds") or []
+    if not isinstance(song_ids, list):
+        raise HTTPException(400, "ids must be a list")
+    songs = [song.model_dump() for song in get_frontend_songs([str(song_id) for song_id in song_ids])]
+    return {"songs": songs}
 
 
 @app.post("/api/prefetch/album")
 async def prefetch_album(request: Request):
     payload = await request.json()
     album_id = payload.get("albumId")
-    lead_limit = int(payload.get("leadLimit") or 4)
+    song_id = payload.get("songId")
+    lead_limit = int(payload.get("leadLimit") or payload.get("limit") or 4)
     refresh_links = bool(payload.get("refreshLinks"))
+    if not album_id and song_id:
+        song = get_song(str(song_id))
+        album_id = song.album_id if song else None
     if not album_id:
-        raise HTTPException(400, "albumId is required")
+        raise HTTPException(400, "albumId or songId is required")
     song_ids = album_song_ids(str(album_id))
     if not song_ids:
         raise HTTPException(404, "Album not found")
     queued = queue_album_prefetch(str(album_id), max(1, min(lead_limit, 8)), refresh_links=refresh_links)
-    return {"ok": True, "queued": int(queued), "songCount": len(song_ids)}
+    return {"ok": True, "queued": int(queued), "queuedAlbums": int(queued), "queuedSongs": 0, "songCount": len(song_ids), "albumSongCount": len(song_ids)}
+
+
+@app.post("/api/refresh/request")
+async def refresh_request(request: Request):
+    payload = await request.json()
+    song_id = str(payload.get("id") or payload.get("songId") or "").strip()
+    if not song_id:
+        raise HTTPException(400, "Song id is required")
+    song = get_song(song_id)
+    if not song:
+        raise HTTPException(404, "Song not found")
+    queued = queue_album_prefetch(song.album_id, 4, refresh_links=True)
+    return {
+        "queued": bool(queued),
+        "workerActive": True,
+        "queueLength": 1 if queued else 0,
+    }
+
+
+@app.post("/api/refresh/result")
+async def refresh_result(request: Request):
+    payload = await request.json()
+    return {
+        "ok": bool(payload.get("ok")),
+        "status": {
+            "songId": payload.get("id") or payload.get("songId"),
+            "message": payload.get("message") or "Refresh result accepted.",
+        },
+    }
+
+
+@app.post("/api/refresh/heartbeat")
+def refresh_heartbeat():
+    status = get_refresh_status()
+    return {"ok": True, "workerActive": status.get("status") not in {"idle", "error"}, "queueLength": 0}
 
 
 @app.post("/api/playback/prefetch")

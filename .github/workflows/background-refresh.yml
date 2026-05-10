@@ -339,7 +339,22 @@ jobs:
             export SCRAPER_ABORT_ON_PAGE1_LIMITED="true"
             workers="${SCRAPER_WORKERS:-1}"
             mode_label="FULL PAGEWISE SOURCE CRAWL"
-            args=(--full --mode pagewise --workers "${workers}" --batch-size 3 --report-path "${REFRESH_REPORT}")
+            args=(
+              --full
+              --mode pagewise
+              --workers "${workers}"
+              --batch-size 3
+              --page-delay "${SCRAPER_LISTING_DELAY_SECONDS}"
+              --album-delay "${SCRAPER_DETAIL_DELAY_SECONDS}"
+              --retry-count "${SCRAPER_MAX_ATTEMPTS}"
+              --retry-base-delay "${SCRAPER_RETRY_BASE_DELAY_SECONDS}"
+              --retry-max-delay "${SCRAPER_RETRY_MAX_DELAY_SECONDS}"
+              --stop-after-known-pages 2
+              --movie-index-stop-after-known-pages 120
+              --max-limiter-streak "${SCRAPER_MAX_LIMITER_STREAK}"
+              --abort-on-page1-limited
+              --report-path "${REFRESH_REPORT}"
+            )
           else
             export SCRAPER_LISTING_DELAY_SECONDS="4"
             export SCRAPER_DETAIL_DELAY_SECONDS="2"
@@ -353,7 +368,21 @@ jobs:
             export SCRAPER_ABORT_ON_PAGE1_LIMITED="true"
             workers="${SCRAPER_WORKERS:-1}"
             mode_label="INCREMENTAL PAGEWISE REFRESH"
-            args=(--mode pagewise --workers "${workers}" --batch-size 3 --report-path "${REFRESH_REPORT}")
+            args=(
+              --mode pagewise
+              --workers "${workers}"
+              --batch-size 3
+              --page-delay "${SCRAPER_LISTING_DELAY_SECONDS}"
+              --album-delay "${SCRAPER_DETAIL_DELAY_SECONDS}"
+              --retry-count "${SCRAPER_MAX_ATTEMPTS}"
+              --retry-base-delay "${SCRAPER_RETRY_BASE_DELAY_SECONDS}"
+              --retry-max-delay "${SCRAPER_RETRY_MAX_DELAY_SECONDS}"
+              --stop-after-known-pages 2
+              --movie-index-stop-after-known-pages 120
+              --max-limiter-streak "${SCRAPER_MAX_LIMITER_STREAK}"
+              --abort-on-page1-limited
+              --report-path "${REFRESH_REPORT}"
+            )
           fi
 
           echo "::group::Refresh configuration"
