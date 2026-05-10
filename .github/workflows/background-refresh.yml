@@ -59,9 +59,9 @@ jobs:
 
       - name: Install workflow dependencies
         env:
-          # Skip Playwright's browser download — CI doesn't run the headless
-          # Chrome fallback, and the binary is ~150 MB.
-          PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: "1"
+          # Browser binaries are needed for the scraper's Playwright fallback
+          # when MassTamilan serves a browser challenge to plain HTTP clients.
+          PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: "0"
         run: |
           set -euo pipefail
           python -m pip install --upgrade pip
@@ -94,6 +94,7 @@ jobs:
               raise SystemExit(1)
           print("All required Python modules import cleanly.")
           PY
+          python -m playwright install --with-deps chromium
           npm install --global wrangler@4.81.1
 
       - name: Validate workflow configuration
@@ -316,7 +317,9 @@ jobs:
           MASSTAMILAN_RETRY_BASE_DELAY: "8"
           MASSTAMILAN_RETRY_MAX_DELAY: "45"
           MASSTAMILAN_CHALLENGE_COOLDOWN: "45"
-          MASSTAMILAN_MAX_CHALLENGE_STREAK: "1"
+          MASSTAMILAN_MAX_CHALLENGE_STREAK: "4"
+          MASSTAMILAN_USE_PLAYWRIGHT: "true"
+          MASSTAMILAN_PLAYWRIGHT_TIMEOUT_MS: "60000"
           PYTHONUNBUFFERED: "1"
         run: |
           set -euo pipefail
@@ -329,7 +332,7 @@ jobs:
           batch_size=$(( workers * 3 ))
 
           mode_label="FULL PAGEWISE SOURCE CRAWL"
-          args=(--full --mode pagewise --skip-rescrape --workers "${workers}" --batch-size "${batch_size}" --report-path "${REFRESH_REPORT}")
+          args=(--full --mode pagewise --workers "${workers}" --batch-size "${batch_size}" --report-path "${REFRESH_REPORT}")
 
           echo "::group::Refresh configuration"
           echo "  mode                  = $mode_label"

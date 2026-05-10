@@ -315,6 +315,9 @@ def main() -> None:
                     print(f"WARN - {message}")
 
             if args.full and not args.skip_rescrape:
+                discovery_pages = sum(summary.pages_scraped for summary in summaries)
+                if (run_pagewise or run_movie_index) and discovery_pages <= 0 and report.get("challenged_pages"):
+                    raise RuntimeError("Source discovery was blocked before full catalog rescrape")
                 cap = args.max_rescrape if args.max_rescrape and args.max_rescrape > 0 else None
                 if cap:
                     print(f"INFO - [3/3] Re-scraping up to {cap} prioritised albums (capped) ...")

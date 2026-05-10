@@ -45,6 +45,143 @@ class _DownloadJob:
     error: Optional[BaseException] = None
 
 
+@dataclass
+class _PageJob:
+    url: str
+    referer: Optional[str]
+    done: threading.Event
+    html: Optional[str] = None
+    error: Optional[BaseException] = None
+
+
+class PlaywrightPageFetcher:
+    """Single-thread Playwright runner for HTML pages.
+
+    This mirrors PlaywrightDownloader because Playwright's sync runtime must stay
+    on the thread where it was created. Scraper worker threads submit page fetches
+    into this queue instead of touching Chromium directly.
+    """
+
+    def __init__(self) -> None:
+        self._jobs: "queue.Queue[Optional[_PageJob]]" = queue.Queue()
+        self._worker: threading.Thread | None = None
+        self._worker_lock = threading.Lock()
+        self._available: bool | None = None
+
+    def available(self) -> bool:
+        if self._available is None:
+            try:
+                from playwright.sync_api import sync_playwright  # noqa: F401
+                self._available = True
+            except Exception:
+                self._available = False
+        return self._available
+
+    def _ensure_worker(self) -> None:
+        with self._worker_lock:
+            if self._worker is not None and self._worker.is_alive():
+                return
+            self._worker = threading.Thread(
+                target=self._run_worker,
+                name="playwright-page-fetcher",
+                daemon=True,
+            )
+            self._worker.start()
+
+    def _run_worker(self) -> None:
+        from playwright.sync_api import sync_playwright
+
+        runtime = None
+        browser = None
+
+        def init_runtime():
+            nonlocal runtime, browser
+            runtime = sync_playwright().start()
+            browser = runtime.chromium.launch(
+                headless=True,
+                args=["--disable-blink-features=AutomationControlled"],
+            )
+
+        def reset_runtime():
+            nonlocal runtime, browser
+            try:
+                if browser is not None:
+                    browser.close()
+            except Exception:
+                pass
+            try:
+                if runtime is not None:
+                    runtime.stop()
+            except Exception:
+                pass
+            runtime = None
+            browser = None
+
+        try:
+            while True:
+                job = self._jobs.get()
+                if job is None:
+                    return
+                context = None
+                page = None
+                try:
+                    if browser is None:
+                        init_runtime()
+                    assert browser is not None
+                    context_kwargs = {
+                        "user_agent": CHROME_UA,
+                        "locale": "en-US",
+                    }
+                    if job.referer:
+                        context_kwargs["extra_http_headers"] = {"referer": job.referer}
+                    context = browser.new_context(**context_kwargs)
+                    page = context.new_page()
+                    started = time.perf_counter()
+                    page.goto(
+                        job.url,
+                        wait_until="domcontentloaded",
+                        timeout=SCRAPER_PLAYWRIGHT_TIMEOUT_MS,
+                    )
+                    try:
+                        page.wait_for_load_state("networkidle", timeout=10_000)
+                    except Exception:
+                        pass
+                    html = page.content()
+                    elapsed_ms = (time.perf_counter() - started) * 1000
+                    print(
+                        f"[playwright] fetched page url={job.url[:80]} "
+                        f"size={len(html)} elapsed_ms={elapsed_ms:.0f}"
+                    )
+                    job.html = html
+                except Exception as exc:
+                    job.error = exc
+                    reset_runtime()
+                finally:
+                    if context is not None:
+                        try:
+                            context.close()
+                        except Exception:
+                            pass
+                    job.done.set()
+        finally:
+            reset_runtime()
+
+    def fetch_html(self, url: str, *, referer: str | None = None) -> str:
+        if not self.available():
+            raise RuntimeError("Playwright is not installed")
+        self._ensure_worker()
+        job = _PageJob(url=url, referer=referer, done=threading.Event())
+        self._jobs.put(job)
+        wait_seconds = max(60, int(SCRAPER_PLAYWRIGHT_TIMEOUT_MS / 1000) + 15)
+        if not job.done.wait(timeout=wait_seconds):
+            raise RuntimeError(f"Playwright page fetch did not complete within {wait_seconds} s")
+        if job.error is not None:
+            raise job.error
+        if job.html is None:
+            raise RuntimeError("Playwright page fetch returned no HTML")
+        return job.html
+
+
 class PlaywrightDownloader:
     """Single-thread Playwright runner; thread-safe submit().
 
@@ -196,3 +333,4 @@ class PlaywrightDownloader:
 
 
 playwright_downloader = PlaywrightDownloader()
+playwright_page_fetcher = PlaywrightPageFetcher()

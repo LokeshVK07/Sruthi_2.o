@@ -21,6 +21,7 @@ from .config import (
     SCRAPER_CHALLENGE_COOLDOWN_SECONDS,
     SCRAPER_DELAY_SECONDS,
     SCRAPER_MAX_ATTEMPTS,
+    SCRAPER_PLAYWRIGHT_ENABLED,
     SCRAPER_RETRY_BASE_DELAY_SECONDS,
     SCRAPER_RETRY_MAX_DELAY_SECONDS,
     SITE_BASE_URL,
@@ -211,6 +212,16 @@ class SiteScraper:
                 continue
             return html
         if challenge_count and challenge_count == len([1 for _ in errors]):
+            if SCRAPER_PLAYWRIGHT_ENABLED:
+                try:
+                    from .playwright_fetch import playwright_page_fetcher
+
+                    html = playwright_page_fetcher.fetch_html(url, referer=referer)
+                    if not is_challenge_page(html, 200, {"content-type": "text/html"}):
+                        return html
+                    errors.append("playwright: challenge page")
+                except Exception as exc:
+                    errors.append(f"playwright: {exc}")
             raise ChallengeError(f"Challenge page detected for {url} ({'; '.join(errors)})")
         raise FetchError("; ".join(errors) if errors else f"Failed to fetch {url}")
 
