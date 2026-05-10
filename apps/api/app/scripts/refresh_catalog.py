@@ -12,7 +12,7 @@ from typing import Any
 from app.config import DATABASE_PATH, SITE_MAX_PAGES
 from app.db import init_db
 from app.schemas import ScrapeSummary
-from app.scraper import site_scraper
+from app.scraper import log_info, site_scraper
 import app.scraper as scraper_module
 
 
@@ -352,12 +352,15 @@ def main() -> None:
     exit_code = 0
     summaries: list[ScrapeSummary] = []
 
-    run_pagewise = args.mode in {"all", "pagewise"} and not args.skip_pagewise
+    # In the isaibox scraper, "all" means tag/category pattern discovery
+    # (/tag/0-9, /tag/A, ...), not the plain /tamil-songs listing.
+    run_pagewise = args.mode == "pagewise" and not args.skip_pagewise
     run_movie_index = args.mode in {"all", "movie-index"} and not args.skip_movie_index
 
-    print("=" * 64)
-    print(f"INFO - Vibe 2.o standalone scraper - MODE: {report['mode'].upper()}")
-    print("=" * 64)
+    log_info("============================================================")
+    log_info(f"isaibox standalone scraper - MODE: {args.mode.upper()}")
+    log_info("============================================================")
+    log_info("[1/4] Connecting to DuckDB...")
 
     try:
         if args.retry_failed_only:
@@ -409,9 +412,9 @@ def main() -> None:
                     print(f"WARN - {message}")
 
             if run_movie_index:
-                print("INFO - [2/3] Refreshing movie-index catalog...")
+                log_info(f"[2/4] Discovering albums using '{args.mode}' mode...")
                 try:
-                    max_section_pages = None if args.full else 2
+                    max_section_pages = None if args.full or args.mode == "all" else 2
                     summary = site_scraper.scrape_movie_index(
                         incremental=not args.full,
                         full_scan=args.full,

@@ -338,10 +338,10 @@ jobs:
             export SCRAPER_MAX_LIMITER_STREAK="4"
             export SCRAPER_ABORT_ON_PAGE1_LIMITED="true"
             workers="${SCRAPER_WORKERS:-1}"
-            mode_label="FULL PAGEWISE SOURCE CRAWL"
+            mode_label="FULL ALL CATEGORY DISCOVERY"
             args=(
               --full
-              --mode pagewise
+              --mode all
               --workers "${workers}"
               --batch-size 3
               --page-delay "${SCRAPER_LISTING_DELAY_SECONDS}"
@@ -367,9 +367,9 @@ jobs:
             export SCRAPER_MAX_LIMITER_STREAK="3"
             export SCRAPER_ABORT_ON_PAGE1_LIMITED="true"
             workers="${SCRAPER_WORKERS:-1}"
-            mode_label="INCREMENTAL PAGEWISE REFRESH"
+            mode_label="INCREMENTAL ALL CATEGORY DISCOVERY"
             args=(
-              --mode pagewise
+              --mode all
               --workers "${workers}"
               --batch-size 3
               --page-delay "${SCRAPER_LISTING_DELAY_SECONDS}"

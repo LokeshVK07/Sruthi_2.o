@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import UTC, datetime
 import random
 import re
 import threading
@@ -54,6 +55,11 @@ class ChallengeStreakAborted(Exception):
     """
 
     pass
+
+
+def log_info(message: str = "") -> None:
+    stamp = datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S,%f")[:-3]
+    print(f"[{stamp}] INFO - {message}")
 
 
 HEADERS = {
@@ -496,11 +502,17 @@ class SiteScraper:
     def _section_page_url(self, section_url: str, page_number: int) -> str:
         parsed = urlparse(section_url)
         query = parse_qs(parsed.query)
-        if page_number <= 1:
+        if "/tag/" in parsed.path:
+            query["page"] = [str(page_number)]
+        elif page_number <= 1:
             query.pop("page", None)
         else:
             query["page"] = [str(page_number)]
         return urlunparse(parsed._replace(query=urlencode(query, doseq=True)))
+
+    def _section_pattern(self, section_url: str) -> str:
+        parsed = urlparse(section_url)
+        return f"{parsed.path}?page={{page}}"
 
     def discover_index_section_page(self, section_url: str, page_number: int = 1) -> tuple[list[str], int]:
         page_url = self._section_page_url(section_url, page_number)
@@ -1067,22 +1079,28 @@ class SiteScraper:
         consecutive_known_pages = 0
         try:
             sections = self.discover_movie_index_sections(report=report)
-            targets: list[tuple[str, str]] = [("landing", url) for url in sections["landing"]]
+            targets: list[tuple[str, str]] = []
             if include_alphabet:
                 targets.extend(("section", url) for url in sections["alphabet"])
             if include_years:
                 targets.extend(("year", url) for url in sections["years"])
+            targets.extend(("landing", url) for url in sections["landing"])
 
             for section_type, section_url in targets:
                 if challenge_aborted:
                     break
                 page_number = 1
                 discovered_max_page = 1
+                section_new_total = 0
                 section_label = urlparse(section_url).path
+                if section_type == "section":
+                    log_info(f"Starting discovery on pattern: {self._section_pattern(section_url)}...")
                 while True:
                     if max_section_pages and page_number > max_section_pages:
                         break
                     page_url = self._section_page_url(section_url, page_number)
+                    if section_type == "section":
+                        log_info(f"  Fetching listing page {page_number}: {page_url}")
                     try:
                         urls, max_page = self.discover_index_section_page(section_url, page_number)
                         reached_any_page = True
@@ -1116,6 +1134,9 @@ class SiteScraper:
                         page_number += 1
                         continue
                     except Exception as exc:
+                        if section_type == "section" and "HTTP 404" in str(exc):
+                            log_info(f"  -> Page {page_number} returned 404. Reached end of category.")
+                            break
                         self._record_issue(
                             report,
                             "failed_pages",
@@ -1146,14 +1167,15 @@ class SiteScraper:
                         phase_report[page_key] = phase_report.get(page_key, 0) + 1
 
                     new_on_page = max(len(urls) - len(known), 0)
+                    if section_type == "section":
+                        section_new_total += new_on_page
                     if section_type == "landing":
-                        print(f"INFO - Movie index page {page_number}: {len(urls)} albums, {new_on_page} new")
+                        log_info(f"Movie index page {page_number}: {len(urls)} albums, {new_on_page} new")
                     elif section_type == "section":
-                        section_name = section_label.rsplit("/", 1)[-1]
-                        print(f"INFO - Section {section_name} page {page_number}: {len(urls)} albums, {new_on_page} new")
+                        log_info(f"  Page {page_number}: {new_on_page} new / {len(urls)} total")
                     else:
                         year_name = section_label.rsplit("/", 1)[-1]
-                        print(f"INFO - Year {year_name} page {page_number}: {len(urls)} albums, {new_on_page} new")
+                        log_info(f"Year {year_name} page {page_number}: {len(urls)} albums, {new_on_page} new")
 
                     if incremental and not full_scan:
                         if new_on_page == 0:
@@ -1185,6 +1207,9 @@ class SiteScraper:
                     if page_number >= discovered_max_page:
                         break
                     page_number += 1
+
+                if section_type == "section":
+                    log_info(f"Discovery done: {section_new_total} total new album(s) discovered.")
 
             if not reached_any_page and full_scan:
                 raise RuntimeError("Full movie-index scan completed without scraping any pages")
