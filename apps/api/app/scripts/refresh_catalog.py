@@ -68,6 +68,27 @@ def _ensure_progress(report: dict[str, Any]) -> None:
         raise RuntimeError("Refresh aborted because no source pages or albums were processed successfully")
 
 
+def _ensure_publishable(report: dict[str, Any]) -> None:
+    summary = report["summary"]
+    limited_pages = int(summary.get("challenged_pages", 0) or 0)
+    limited_albums = int(summary.get("challenged_albums", 0) or 0)
+    failed_pages = int(summary.get("failed_pages", 0) or 0)
+    failed_albums = int(summary.get("failed_albums", 0) or 0)
+    if limited_pages or limited_albums:
+        report["blocked"] = True
+        report["partial"] = True
+        raise RuntimeError(
+            "Refresh blocked by upstream limiter; preserving previous catalog "
+            f"(limited_pages={limited_pages}, limited_albums={limited_albums})"
+        )
+    if failed_pages or failed_albums:
+        report["partial"] = True
+        raise RuntimeError(
+            "Refresh produced partial results; preserving previous catalog "
+            f"(failed_pages={failed_pages}, failed_albums={failed_albums})"
+        )
+
+
 def _new_report(args: argparse.Namespace) -> dict[str, Any]:
     mode = "full" if args.full else "incremental"
     return {
@@ -77,6 +98,8 @@ def _new_report(args: argparse.Namespace) -> dict[str, Any]:
         "durationSeconds": 0.0,
         "status": "running",
         "success": False,
+        "blocked": False,
+        "partial": False,
         "databasePath": str(DATABASE_PATH),
         "config": {
             "mode": args.mode,
@@ -86,6 +109,12 @@ def _new_report(args: argparse.Namespace) -> dict[str, Any]:
             "startPage": args.start_page,
             "maxPages": args.max_pages,
             "delay": args.delay,
+            "listingDelay": args.listing_delay,
+            "detailDelay": args.detail_delay,
+            "jitter": args.jitter,
+            "limiterCooldown": args.limiter_cooldown,
+            "maxLimiterStreak": args.max_limiter_streak or args.max_challenge_streak,
+            "abortOnPage1Limited": args.abort_on_page1_limited,
             "retryFailedOnly": args.retry_failed_only,
             "dryRun": args.dry_run,
         },
@@ -187,11 +216,20 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--delay", type=float, default=None, help="(Deprecated) generic per-fetch delay; use --listing-delay/--detail-delay.")
     parser.add_argument("--listing-delay", type=float, default=None, help="Polite delay (seconds) between listing-page fetches.")
     parser.add_argument("--detail-delay", type=float, default=None, help="Polite delay (seconds) between album-detail fetches.")
+    parser.add_argument("--jitter", type=float, default=None, help="Maximum random jitter (seconds) added to scraper sleeps.")
+    parser.add_argument("--limiter-cooldown", type=float, default=None, help="Base shared cooldown after an upstream limiter response.")
+    parser.add_argument("--abort-on-page1-limited", action=argparse.BooleanOptionalAction, default=None, help="Abort safely if listing page 1 remains limited after retries.")
     parser.add_argument(
         "--max-challenge-streak",
         type=int,
         default=None,
         help="Stop the listing crawl after N consecutive challenged listing pages (0 disables).",
+    )
+    parser.add_argument(
+        "--max-limiter-streak",
+        type=int,
+        default=None,
+        help="Alias for --max-challenge-streak using limiter terminology.",
     )
     parser.add_argument(
         "--max-rescrape",
@@ -223,14 +261,31 @@ def main() -> None:
         os.environ["MASSTAMILAN_LISTING_DELAY"] = str(args.listing_delay)
     if args.detail_delay is not None:
         os.environ["MASSTAMILAN_DETAIL_DELAY"] = str(args.detail_delay)
-    if args.max_challenge_streak is not None:
-        os.environ["MASSTAMILAN_MAX_CHALLENGE_STREAK"] = str(args.max_challenge_streak)
+    if args.jitter is not None:
+        os.environ["SCRAPER_JITTER_SECONDS"] = str(args.jitter)
+    if args.limiter_cooldown is not None:
+        os.environ["SCRAPER_LIMITER_COOLDOWN_SECONDS"] = str(args.limiter_cooldown)
+    limiter_streak = args.max_limiter_streak if args.max_limiter_streak is not None else args.max_challenge_streak
+    if limiter_streak is not None:
+        os.environ["MASSTAMILAN_MAX_CHALLENGE_STREAK"] = str(limiter_streak)
+    if args.abort_on_page1_limited is not None:
+        os.environ["SCRAPER_ABORT_ON_PAGE1_LIMITED"] = "true" if args.abort_on_page1_limited else "false"
 
     init_db()
     # Apply the streak/delay overrides to the live scraper instance after
     # init_db (which can be a no-op but is the canonical "ready" point).
-    if args.max_challenge_streak is not None:
-        site_scraper.max_listing_challenge_streak = max(0, args.max_challenge_streak)
+    if args.listing_delay is not None:
+        site_scraper.listing_delay_seconds = max(0.0, args.listing_delay)
+    if args.detail_delay is not None:
+        site_scraper.detail_delay_seconds = max(0.0, args.detail_delay)
+    if args.jitter is not None:
+        site_scraper.jitter_seconds = max(0.0, args.jitter)
+    if args.limiter_cooldown is not None:
+        site_scraper.limiter_cooldown_seconds = max(0.0, args.limiter_cooldown)
+    if limiter_streak is not None:
+        site_scraper.max_listing_challenge_streak = max(0, limiter_streak)
+    if args.abort_on_page1_limited is not None:
+        site_scraper.abort_on_page1_limited = bool(args.abort_on_page1_limited)
 
     report = _new_report(args)
     report_path = args.report_path
@@ -335,6 +390,7 @@ def main() -> None:
 
         _update_summary(report)
         _ensure_progress(report)
+        _ensure_publishable(report)
 
         report["success"] = True
         report["status"] = "warning" if any(
@@ -355,7 +411,14 @@ def main() -> None:
     except Exception as exc:
         exit_code = 1
         report["success"] = False
-        report["status"] = "failed"
+        if report.get("blocked") or report.get("challenged_pages") or report.get("challenged_albums"):
+            report["blocked"] = True
+            report["partial"] = True
+            report["status"] = "blocked"
+        elif report.get("partial"):
+            report["status"] = "partial"
+        else:
+            report["status"] = "failed"
         report["errors"].append(str(exc))
         print(f"ERROR - {exc}", file=sys.stderr)
     finally:

@@ -18,8 +18,11 @@ from .config import (
     MAX_CHALLENGE_STREAK,
     MOVIE_INDEX_MAX_YEAR,
     MOVIE_INDEX_MIN_YEAR,
+    SCRAPER_ABORT_ON_PAGE1_LIMITED,
     SCRAPER_CHALLENGE_COOLDOWN_SECONDS,
     SCRAPER_DELAY_SECONDS,
+    SCRAPER_JITTER_SECONDS,
+    SCRAPER_LIMITER_MAX_COOLDOWN_SECONDS,
     SCRAPER_MAX_ATTEMPTS,
     SCRAPER_RETRY_BASE_DELAY_SECONDS,
     SCRAPER_RETRY_MAX_DELAY_SECONDS,
@@ -91,6 +94,11 @@ USER_AGENTS = (
 STRONG_CHALLENGE_MARKERS = (
     "just a moment",
     "checking your browser",
+    "cloudflare",
+    "captcha",
+    "rate limit",
+    "too many requests",
+    "temporarily unavailable",
     "verifying you are human",
     "enable javascript and cookies to continue",
     "attention required",
@@ -151,8 +159,18 @@ class SiteScraper:
         # of walking dozens more guaranteed-to-be-blocked pages.
         self.listing_challenge_streak = 0
         self.max_listing_challenge_streak = MAX_CHALLENGE_STREAK
+        self.abort_on_page1_limited = SCRAPER_ABORT_ON_PAGE1_LIMITED
+        self.listing_delay_seconds = LISTING_DELAY_SECONDS
+        self.detail_delay_seconds = DETAIL_DELAY_SECONDS
+        self.jitter_seconds = SCRAPER_JITTER_SECONDS
+        self.max_attempts = SCRAPER_MAX_ATTEMPTS
+        self.retry_base_delay_seconds = SCRAPER_RETRY_BASE_DELAY_SECONDS
+        self.retry_max_delay_seconds = SCRAPER_RETRY_MAX_DELAY_SECONDS
+        self.limiter_cooldown_seconds = SCRAPER_CHALLENGE_COOLDOWN_SECONDS
+        self.limiter_max_cooldown_seconds = SCRAPER_LIMITER_MAX_COOLDOWN_SECONDS
         self.cooldown_lock = threading.Lock()
         self.cooldown_until = 0.0
+        self.limiter_hit_count = 0
 
     def _rotated_headers(self, referer: str | None = None) -> dict[str, str]:
         headers = HEADERS.copy()
@@ -207,25 +225,41 @@ class SiteScraper:
         time.sleep(remaining)
 
     def _trigger_cooldown(self, *, kind: str, attempt: int, reason: str) -> None:
-        if SCRAPER_CHALLENGE_COOLDOWN_SECONDS <= 0:
+        if self.limiter_cooldown_seconds <= 0:
             return
-        cooldown = SCRAPER_CHALLENGE_COOLDOWN_SECONDS
-        cooldown += random.uniform(0, min(5.0, cooldown * 0.1))
+        with self.cooldown_lock:
+            self.limiter_hit_count += 1
+            limiter_hit_count = self.limiter_hit_count
+        multiplier = 1
+        if limiter_hit_count >= 2:
+            multiplier = 2
+        if limiter_hit_count >= max(3, self.max_listing_challenge_streak):
+            multiplier = 5
+        cooldown = min(
+            self.limiter_max_cooldown_seconds,
+            self.limiter_cooldown_seconds * multiplier,
+        )
+        cooldown += random.uniform(0, min(self.jitter_seconds, max(0.0, cooldown * 0.1)))
         until = time.monotonic() + cooldown
         with self.cooldown_lock:
             if until <= self.cooldown_until:
                 return
             self.cooldown_until = until
-        print(f"[scrape] upstream limiter hit during {kind}; cooling down for {cooldown:.1f}s ({reason})")
+        print(
+            f"[scrape] upstream limiter hit during {kind}; "
+            f"streak={limiter_hit_count}; cooling down for {cooldown:.1f}s ({reason})"
+        )
 
     def _sleep_with_backoff(
         self,
         attempt: int,
-        base: float = SCRAPER_RETRY_BASE_DELAY_SECONDS,
-        ceiling: float = SCRAPER_RETRY_MAX_DELAY_SECONDS,
+        base: float | None = None,
+        ceiling: float | None = None,
     ) -> None:
-        delay = min(ceiling, base * (2 ** max(0, attempt - 1)))
-        delay += random.uniform(0, min(1.0, delay / 4))
+        base_delay = self.retry_base_delay_seconds if base is None else base
+        max_delay = self.retry_max_delay_seconds if ceiling is None else ceiling
+        delay = min(max_delay, base_delay * (2 ** max(0, attempt - 1)))
+        delay += random.uniform(0, min(self.jitter_seconds, delay / 4))
         time.sleep(delay)
 
     def _request_once(self, url: str, referer: str | None = None) -> str:
@@ -272,7 +306,7 @@ class SiteScraper:
         url: str,
         referer: str | None = None,
         *,
-        max_attempts: int = SCRAPER_MAX_ATTEMPTS,
+        max_attempts: int | None = None,
         polite_delay: bool = True,
         kind: str = "detail",
     ) -> str:
@@ -284,16 +318,15 @@ class SiteScraper:
         should bail out on if Cloudflare's flagging the whole crawl.
         """
         listing_kind = kind == "listing"
-        delay = LISTING_DELAY_SECONDS if listing_kind else DETAIL_DELAY_SECONDS
+        max_attempts = self.max_attempts if max_attempts is None else max(1, max_attempts)
+        delay = self.listing_delay_seconds if listing_kind else self.detail_delay_seconds
         last_error: Exception | None = None
         for attempt in range(1, max_attempts + 1):
             try:
                 self._wait_for_cooldown()
                 html = self._request_once(url, referer=referer)
                 if polite_delay and delay > 0:
-                    # Small jitter (≤ 25 % of the delay, max 0.4 s) so we
-                    # don't end up scraping in a perfectly periodic pattern.
-                    time.sleep(delay + random.uniform(0, min(0.4, delay * 0.25)))
+                    time.sleep(delay + random.uniform(0, min(self.jitter_seconds, delay * 0.25)))
                 # Any successful fetch (listing OR detail) clears the streak —
                 # if even one page came through, the IP isn't fully blocked.
                 if self.listing_challenge_streak:
@@ -302,6 +335,8 @@ class SiteScraper:
                         f"{self.listing_challenge_streak} block(s)"
                     )
                     self.listing_challenge_streak = 0
+                with self.cooldown_lock:
+                    self.limiter_hit_count = 0
                 return html
             except ChallengeError as exc:
                 last_error = exc
@@ -309,7 +344,7 @@ class SiteScraper:
                 self._trigger_cooldown(kind=kind, attempt=attempt, reason=str(exc))
                 if attempt >= max_attempts:
                     break
-                self._sleep_with_backoff(attempt, base=max(4.0, SCRAPER_RETRY_BASE_DELAY_SECONDS), ceiling=SCRAPER_RETRY_MAX_DELAY_SECONDS)
+                self._sleep_with_backoff(attempt, base=max(4.0, self.retry_base_delay_seconds), ceiling=self.retry_max_delay_seconds)
             except FetchError as exc:
                 last_error = exc
                 self.reset_session()
@@ -897,6 +932,14 @@ class SiteScraper:
                 except ChallengeError as exc:
                     self._record_issue(report, "challenged_pages", phase="listing", url=page_url, reason=str(exc), page=page_number)
                     print(f"[scrape:listing] page limited page={page_number}: {exc}")
+                    if page_number == page_from == 1 and not reached_any_page and self.abort_on_page1_limited:
+                        message = "Listing crawl aborted: page 1 remained limited after bounded retries"
+                        print(f"[scrape:listing] {message}")
+                        if report is not None:
+                            report.setdefault("warnings", []).append(message)
+                            report["blocked"] = True
+                            report["partial"] = True
+                        raise RuntimeError(message)
                     if self._check_listing_streak():
                         message = (
                             f"Listing crawl aborted: {self.listing_challenge_streak} "
@@ -906,6 +949,8 @@ class SiteScraper:
                         print(f"[scrape:listing] {message}")
                         if report is not None:
                             report.setdefault("warnings", []).append(message)
+                            report["blocked"] = True
+                            report["partial"] = True
                         status = "warning"
                         break
                     page_number += 1

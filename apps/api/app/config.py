@@ -36,23 +36,36 @@ WARMUP_BATCH_SIZE = int(os.getenv("WARMUP_BATCH_SIZE", "48"))
 SITE_BASE_URL = os.getenv("MASSTAMILAN_BASE_URL", "https://www.masstamilan.dev")
 SITE_LIST_PATH = os.getenv("MASSTAMILAN_LIST_PATH", "/tamil-songs")
 SITE_MAX_PAGES = int(os.getenv("MASSTAMILAN_MAX_PAGES", "481"))
+
+
+def _scraper_env(name: str, legacy_name: str, default: str) -> str:
+    return os.getenv(name, os.getenv(legacy_name, default))
+
+
+def _env_bool(name: str, legacy_name: str, default: str = "false") -> bool:
+    return _scraper_env(name, legacy_name, default).strip().lower() in {"1", "true", "yes", "on"}
+
+
 # Generic per-fetch polite delay; older callers use this. New code uses the
 # listing/detail-specific delays below — when those env vars aren't set,
 # this value is the fallback.
-SCRAPER_DELAY_SECONDS = float(os.getenv("MASSTAMILAN_DELAY_SECONDS", "0.2"))
+SCRAPER_DELAY_SECONDS = float(_scraper_env("SCRAPER_DELAY_SECONDS", "MASSTAMILAN_DELAY_SECONDS", "0.2"))
 # Two-track polite delay so listing pages (the ones Cloudflare flags hardest
 # from CI runners) can crawl slower than per-album detail fetches without
 # throttling the whole refresh in lockstep. Workflow defaults override these.
-LISTING_DELAY_SECONDS = float(os.getenv("MASSTAMILAN_LISTING_DELAY", str(SCRAPER_DELAY_SECONDS)))
-DETAIL_DELAY_SECONDS = float(os.getenv("MASSTAMILAN_DETAIL_DELAY", str(SCRAPER_DELAY_SECONDS)))
+LISTING_DELAY_SECONDS = float(_scraper_env("SCRAPER_LISTING_DELAY_SECONDS", "MASSTAMILAN_LISTING_DELAY", str(SCRAPER_DELAY_SECONDS)))
+DETAIL_DELAY_SECONDS = float(_scraper_env("SCRAPER_DETAIL_DELAY_SECONDS", "MASSTAMILAN_DETAIL_DELAY", str(SCRAPER_DELAY_SECONDS)))
+SCRAPER_JITTER_SECONDS = float(_scraper_env("SCRAPER_JITTER_SECONDS", "MASSTAMILAN_JITTER_SECONDS", "1.5"))
 # Stop the listing crawl after this many consecutive challenged listing
 # fetches. Prevents the refresh from walking pages 40, 50, 70 once Cloudflare
 # clearly flagged the runner's IP. Set to 0 to disable.
-MAX_CHALLENGE_STREAK = int(os.getenv("MASSTAMILAN_MAX_CHALLENGE_STREAK", "4"))
-SCRAPER_MAX_ATTEMPTS = max(1, int(os.getenv("MASSTAMILAN_MAX_ATTEMPTS", "3")))
-SCRAPER_RETRY_BASE_DELAY_SECONDS = float(os.getenv("MASSTAMILAN_RETRY_BASE_DELAY", "1.5"))
-SCRAPER_RETRY_MAX_DELAY_SECONDS = float(os.getenv("MASSTAMILAN_RETRY_MAX_DELAY", "20"))
-SCRAPER_CHALLENGE_COOLDOWN_SECONDS = float(os.getenv("MASSTAMILAN_CHALLENGE_COOLDOWN", "0"))
+MAX_CHALLENGE_STREAK = int(_scraper_env("SCRAPER_MAX_LIMITER_STREAK", "MASSTAMILAN_MAX_CHALLENGE_STREAK", "4"))
+SCRAPER_MAX_ATTEMPTS = max(1, int(_scraper_env("SCRAPER_MAX_ATTEMPTS", "MASSTAMILAN_MAX_ATTEMPTS", "3")))
+SCRAPER_RETRY_BASE_DELAY_SECONDS = float(_scraper_env("SCRAPER_RETRY_BASE_DELAY_SECONDS", "MASSTAMILAN_RETRY_BASE_DELAY", "1.5"))
+SCRAPER_RETRY_MAX_DELAY_SECONDS = float(_scraper_env("SCRAPER_RETRY_MAX_DELAY_SECONDS", "MASSTAMILAN_RETRY_MAX_DELAY", "20"))
+SCRAPER_CHALLENGE_COOLDOWN_SECONDS = float(_scraper_env("SCRAPER_LIMITER_COOLDOWN_SECONDS", "MASSTAMILAN_CHALLENGE_COOLDOWN", "0"))
+SCRAPER_LIMITER_MAX_COOLDOWN_SECONDS = float(_scraper_env("SCRAPER_LIMITER_MAX_COOLDOWN_SECONDS", "MASSTAMILAN_LIMITER_MAX_COOLDOWN", "300"))
+SCRAPER_ABORT_ON_PAGE1_LIMITED = _env_bool("SCRAPER_ABORT_ON_PAGE1_LIMITED", "MASSTAMILAN_ABORT_ON_PAGE1_LIMITED", "true")
 MOVIE_INDEX_MIN_YEAR = int(os.getenv("MASSTAMILAN_MIN_YEAR", "1930"))
 MOVIE_INDEX_MAX_YEAR = int(os.getenv("MASSTAMILAN_MAX_YEAR", str(datetime.utcnow().year)))
 SCRAPER_PLAYWRIGHT_ENABLED = os.getenv("MASSTAMILAN_USE_PLAYWRIGHT", "false").strip().lower() in {"1", "true", "yes", "on"}

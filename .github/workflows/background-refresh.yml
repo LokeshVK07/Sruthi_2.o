@@ -163,6 +163,9 @@ jobs:
           if [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" && "${{ inputs.full_refresh }}" == "true" ]]; then
             full_refresh="true"
           fi
+          if [[ "${SCRAPER_FULL_REFRESH:-false}" == "true" ]]; then
+            full_refresh="true"
+          fi
           echo "SRUTHI_FULL_REFRESH=${full_refresh}" >> "$GITHUB_ENV"
 
       - name: Verify Cloudflare token and account access
@@ -279,9 +282,9 @@ jobs:
           PY
 
       - name: Bootstrap working DB from committed catalogue
-        # Keep a known-good committed catalogue as a fallback, then let the
-        # refresh step start from a fresh DB so successful runs produce the
-        # full listing-page crawl logs: "Listing page N: 10 albums, 10 new".
+        # Scheduled/incremental refresh starts from the committed catalogue so
+        # known pages can stop early. Manual full refresh starts from scratch so
+        # successful runs produce "Listing page N: 10 albums, 10 new".
         run: |
           set -euo pipefail
           src="apps/api/data/melodify.sqlite3"
@@ -292,7 +295,15 @@ jobs:
           fi
           mkdir -p "$(dirname "$dst")"
           cp "$src" "$dst"
-          rm -f data/sruthi.db data/sruthi.db-wal data/sruthi.db-shm
+          if [[ "${SRUTHI_FULL_REFRESH}" == "true" ]]; then
+            rm -f data/sruthi.db data/sruthi.db-wal data/sruthi.db-shm
+            start_mode="fresh full source crawl"
+          else
+            mkdir -p data
+            cp "$src" data/sruthi.db
+            rm -f data/sruthi.db-wal data/sruthi.db-shm
+            start_mode="incremental refresh from committed catalogue"
+          fi
           python - <<'PY'
           import os
           import sqlite3
@@ -301,47 +312,61 @@ jobs:
           songs = conn.execute("SELECT COUNT(*) FROM songs").fetchone()[0]
           conn.close()
           print(f"Stored fallback baseline DB: {albums:,} albums, {songs:,} songs.")
-          print("Fresh source crawl will write data/sruthi.db from scratch.")
           PY
+          echo "Refresh start mode: ${start_mode}"
 
       - name: Refresh catalog from MassTamilan
-        # Use the runner's full CPU shape like the proven Sruthi workflow and
-        # force a full scratch crawl so the logs show each listing page as new.
-        # If the upstream site blocks GitHub runner IPs, restore the baseline
-        # DB and let release validation deploy that known-good catalogue.
+        # HTTP-only protected-source scrape. If upstream limits the runner, the
+        # scraper exits non-zero and this job stops before publish/deploy.
         env:
-          MASSTAMILAN_LISTING_DELAY: "8"
-          MASSTAMILAN_DETAIL_DELAY: "3"
-          MASSTAMILAN_MAX_ATTEMPTS: "3"
-          MASSTAMILAN_RETRY_BASE_DELAY: "8"
-          MASSTAMILAN_RETRY_MAX_DELAY: "45"
-          MASSTAMILAN_CHALLENGE_COOLDOWN: "45"
-          MASSTAMILAN_MAX_CHALLENGE_STREAK: "4"
           PYTHONUNBUFFERED: "1"
         run: |
           set -euo pipefail
 
           if [[ "${SRUTHI_FULL_REFRESH}" == "true" ]]; then
-            workers=2
+            export SCRAPER_LISTING_DELAY_SECONDS="8"
+            export SCRAPER_DETAIL_DELAY_SECONDS="3"
+            export SCRAPER_JITTER_SECONDS="2"
+            export SCRAPER_MAX_ATTEMPTS="3"
+            export SCRAPER_RETRY_BASE_DELAY_SECONDS="8"
+            export SCRAPER_RETRY_MAX_DELAY_SECONDS="45"
+            export SCRAPER_LIMITER_COOLDOWN_SECONDS="60"
+            export SCRAPER_LIMITER_MAX_COOLDOWN_SECONDS="300"
+            export SCRAPER_MAX_LIMITER_STREAK="4"
+            export SCRAPER_ABORT_ON_PAGE1_LIMITED="true"
+            workers="${SCRAPER_WORKERS:-1}"
+            mode_label="FULL PAGEWISE SOURCE CRAWL"
+            args=(--full --mode pagewise --workers "${workers}" --batch-size 3 --report-path "${REFRESH_REPORT}")
           else
-            workers=1
+            export SCRAPER_LISTING_DELAY_SECONDS="4"
+            export SCRAPER_DETAIL_DELAY_SECONDS="2"
+            export SCRAPER_JITTER_SECONDS="1.5"
+            export SCRAPER_MAX_ATTEMPTS="2"
+            export SCRAPER_RETRY_BASE_DELAY_SECONDS="6"
+            export SCRAPER_RETRY_MAX_DELAY_SECONDS="30"
+            export SCRAPER_LIMITER_COOLDOWN_SECONDS="45"
+            export SCRAPER_LIMITER_MAX_COOLDOWN_SECONDS="180"
+            export SCRAPER_MAX_LIMITER_STREAK="3"
+            export SCRAPER_ABORT_ON_PAGE1_LIMITED="true"
+            workers="${SCRAPER_WORKERS:-1}"
+            mode_label="INCREMENTAL PAGEWISE REFRESH"
+            args=(--mode pagewise --workers "${workers}" --batch-size 3 --report-path "${REFRESH_REPORT}")
           fi
-          batch_size=$(( workers * 3 ))
-
-          mode_label="FULL PAGEWISE SOURCE CRAWL"
-          args=(--full --mode pagewise --workers "${workers}" --batch-size "${batch_size}" --report-path "${REFRESH_REPORT}")
 
           echo "::group::Refresh configuration"
           echo "  mode                  = $mode_label"
           echo "  workers               = $workers"
-          echo "  batch_size            = $batch_size"
-          echo "  listing delay (s)     = $MASSTAMILAN_LISTING_DELAY"
-          echo "  detail delay (s)      = $MASSTAMILAN_DETAIL_DELAY"
-          echo "  max attempts          = $MASSTAMILAN_MAX_ATTEMPTS"
-          echo "  retry base delay (s)  = $MASSTAMILAN_RETRY_BASE_DELAY"
-          echo "  retry max delay (s)   = $MASSTAMILAN_RETRY_MAX_DELAY"
-          echo "  limiter cooldown(s)   = $MASSTAMILAN_CHALLENGE_COOLDOWN"
-          echo "  max limiter streak    = $MASSTAMILAN_MAX_CHALLENGE_STREAK"
+          echo "  batch_size            = 3"
+          echo "  listing delay (s)     = $SCRAPER_LISTING_DELAY_SECONDS"
+          echo "  detail delay (s)      = $SCRAPER_DETAIL_DELAY_SECONDS"
+          echo "  jitter max (s)        = $SCRAPER_JITTER_SECONDS"
+          echo "  max attempts          = $SCRAPER_MAX_ATTEMPTS"
+          echo "  retry base delay (s)  = $SCRAPER_RETRY_BASE_DELAY_SECONDS"
+          echo "  retry max delay (s)   = $SCRAPER_RETRY_MAX_DELAY_SECONDS"
+          echo "  limiter cooldown(s)   = $SCRAPER_LIMITER_COOLDOWN_SECONDS"
+          echo "  limiter max cdn(s)    = $SCRAPER_LIMITER_MAX_COOLDOWN_SECONDS"
+          echo "  max limiter streak    = $SCRAPER_MAX_LIMITER_STREAK"
+          echo "  abort page1 limited   = $SCRAPER_ABORT_ON_PAGE1_LIMITED"
           echo "  report path           = $REFRESH_REPORT"
           echo "::endgroup::"
 
@@ -350,60 +375,80 @@ jobs:
           refresh_status=$?
           set -e
 
-          if [[ $refresh_status -eq 0 ]]; then
-            echo "Refresh completed successfully."
-            exit 0
-          fi
-
-          echo "::warning::MassTamilan refresh exited with status ${refresh_status}. Restoring the committed baseline catalogue; release validation will still enforce catalogue floors."
-          cp "${BASELINE_DB}" data/sruthi.db
-          rm -f data/sruthi.db-wal data/sruthi.db-shm
-          if [[ -f "${REFRESH_REPORT}" ]]; then
-            python - <<'PY'
+          if [[ $refresh_status -ne 0 ]]; then
+            echo "::error::MassTamilan refresh exited with status ${refresh_status}. Previous live catalog is preserved; deploy/import will not run."
+            if [[ -f "${REFRESH_REPORT}" ]]; then
+              python - <<'PY'
           import json
           import os
           from pathlib import Path
 
-          report_path = Path(os.environ["REFRESH_REPORT"])
-          try:
-              report = json.loads(report_path.read_text(encoding="utf-8"))
-          except Exception as exc:
-              print(f"Could not read refresh report: {exc}")
-              raise SystemExit(0)
-
+          report = json.loads(Path(os.environ["REFRESH_REPORT"]).read_text(encoding="utf-8"))
           summary = report.get("summary") or {}
-          print("Refresh fallback summary")
+          print("Blocked/partial refresh summary")
           print(json.dumps({
               "status": report.get("status"),
               "success": report.get("success"),
+              "blocked": report.get("blocked"),
+              "partial": report.get("partial"),
               "errors": report.get("errors"),
               "warnings": report.get("warnings"),
               "listing_pages_scanned": summary.get("listing_pages_scanned"),
-              "movie_index_pages_scanned": summary.get("movie_index_pages_scanned"),
-              "albums_added": summary.get("albums_added"),
-              "albums_updated": summary.get("albums_updated"),
               "limited_pages": summary.get("challenged_pages"),
               "failed_pages": summary.get("failed_pages"),
               "limited_albums": summary.get("challenged_albums"),
               "failed_albums": summary.get("failed_albums"),
           }, indent=2, sort_keys=True))
           PY
+            fi
+            exit "$refresh_status"
           fi
+
+          echo "Refresh completed successfully."
+
+      - name: Gate refresh report before publish
+        run: |
+          set -euo pipefail
           if [[ ! -f "${REFRESH_REPORT}" ]]; then
-            python - <<'PY'
+            echo "::error::Refresh report missing; refusing to publish."
+            exit 1
+          fi
+          python - <<'PY'
           import json
           import os
           from pathlib import Path
 
-          path = Path(os.environ["REFRESH_REPORT"])
-          path.parent.mkdir(parents=True, exist_ok=True)
-          path.write_text(json.dumps({
-              "status": "failed-before-report",
-              "success": False,
-              "warnings": ["Refresh did not create a report; baseline DB restored."],
-          }, indent=2) + "\n", encoding="utf-8")
+          report_path = Path(os.environ["REFRESH_REPORT"])
+          report = json.loads(report_path.read_text(encoding="utf-8"))
+
+          summary = report.get("summary") or {}
+          blocked = bool(report.get("blocked"))
+          partial = bool(report.get("partial"))
+          limited_pages = int(summary.get("challenged_pages", 0) or 0)
+          limited_albums = int(summary.get("challenged_albums", 0) or 0)
+          failed_pages = int(summary.get("failed_pages", 0) or 0)
+          failed_albums = int(summary.get("failed_albums", 0) or 0)
+          print("Refresh publish gate")
+          payload = {
+              "status": report.get("status"),
+              "success": report.get("success"),
+              "blocked": blocked,
+              "partial": partial,
+              "errors": report.get("errors"),
+              "warnings": report.get("warnings"),
+              "listing_pages_scanned": summary.get("listing_pages_scanned"),
+              "movie_index_pages_scanned": summary.get("movie_index_pages_scanned"),
+              "albums_added": summary.get("albums_added"),
+              "albums_updated": summary.get("albums_updated"),
+              "limited_pages": limited_pages,
+              "failed_pages": failed_pages,
+              "limited_albums": limited_albums,
+              "failed_albums": failed_albums,
+          }
+          print(json.dumps(payload, indent=2, sort_keys=True))
+          if not report.get("success") or blocked or partial or limited_pages or limited_albums or failed_pages or failed_albums:
+              raise SystemExit("Refresh was blocked or partial; previous live catalog is preserved and deploy is skipped.")
           PY
-          fi
 
       - name: Validate refreshed local catalog files
         run: |
@@ -435,10 +480,8 @@ jobs:
           set -e
 
           if [[ $prepare_status -ne 0 ]]; then
-            echo "::warning::Fresh source catalogue failed release validation with status ${prepare_status}. Restoring committed baseline DB and rebuilding release seed."
-            cp "${BASELINE_DB}" data/sruthi.db
-            rm -f data/sruthi.db-wal data/sruthi.db-shm
-            run_prepare_release
+            echo "::error::Fresh source catalogue failed release validation with status ${prepare_status}. Previous live catalog is preserved; deploy/import will not run."
+            exit "$prepare_status"
           fi
 
           if [[ ! -f cloudflare/data/seed.sql ]]; then
