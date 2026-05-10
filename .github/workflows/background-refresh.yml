@@ -379,7 +379,7 @@ jobs:
           set -e
 
           if [[ $refresh_status -ne 0 ]]; then
-            echo "::warning::MassTamilan refresh exited with status ${refresh_status}. Previous live catalog is preserved; deploy/import will not run."
+            echo "::notice::MassTamilan source limiter detected. Previous live catalog is preserved; deploy/import will not run."
             if [[ -f "${REFRESH_REPORT}" ]]; then
               python - <<'PY'
           import json
