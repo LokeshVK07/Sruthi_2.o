@@ -36,8 +36,6 @@ WARMUP_BATCH_SIZE = int(os.getenv("WARMUP_BATCH_SIZE", "48"))
 SITE_BASE_URL = os.getenv("MASSTAMILAN_BASE_URL", "https://www.masstamilan.dev")
 SITE_LIST_PATH = os.getenv("MASSTAMILAN_LIST_PATH", "/tamil-songs")
 SITE_MAX_PAGES = int(os.getenv("MASSTAMILAN_MAX_PAGES", "481"))
-SITE_REFRESH_HEADER = os.getenv("MASSTAMILAN_REFRESH_HEADER", "x-sruthi-refresh-token").strip()
-SITE_REFRESH_TOKEN = os.getenv("MASSTAMILAN_REFRESH_TOKEN", "").strip()
 # Generic per-fetch polite delay; older callers use this. New code uses the
 # listing/detail-specific delays below — when those env vars aren't set,
 # this value is the fallback.

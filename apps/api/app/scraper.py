@@ -26,8 +26,6 @@ from .config import (
     SITE_BASE_URL,
     SITE_LIST_PATH,
     SITE_MAX_PAGES,
-    SITE_REFRESH_HEADER,
-    SITE_REFRESH_TOKEN,
 )
 from .repository import create_scrape_run, finish_scrape_run, known_album_urls, list_album_urls, make_album_id, upsert_album_details
 from .schemas import ScrapedAlbum, ScrapedSong, ScrapeSummary
@@ -164,8 +162,6 @@ class SiteScraper:
             headers["sec-fetch-site"] = "same-origin"
         else:
             headers["sec-fetch-site"] = "none"
-        if SITE_REFRESH_HEADER and SITE_REFRESH_TOKEN:
-            headers[SITE_REFRESH_HEADER] = SITE_REFRESH_TOKEN
         return headers
 
     def _new_cloudscraper(self) -> Any:
