@@ -9,8 +9,8 @@ from typing import Any
 from urllib.parse import parse_qs, urlencode, urljoin, urlparse, urlunparse
 
 import cloudscraper
+import requests
 from bs4 import BeautifulSoup
-from curl_cffi import requests as curl_requests
 
 from .config import (
     DETAIL_DELAY_SECONDS,
@@ -21,12 +21,13 @@ from .config import (
     SCRAPER_CHALLENGE_COOLDOWN_SECONDS,
     SCRAPER_DELAY_SECONDS,
     SCRAPER_MAX_ATTEMPTS,
-    SCRAPER_PLAYWRIGHT_ENABLED,
     SCRAPER_RETRY_BASE_DELAY_SECONDS,
     SCRAPER_RETRY_MAX_DELAY_SECONDS,
     SITE_BASE_URL,
     SITE_LIST_PATH,
     SITE_MAX_PAGES,
+    SITE_REFRESH_HEADER,
+    SITE_REFRESH_TOKEN,
 )
 from .repository import create_scrape_run, finish_scrape_run, known_album_urls, list_album_urls, make_album_id, upsert_album_details
 from .schemas import ScrapedAlbum, ScrapedSong, ScrapeSummary
@@ -53,12 +54,33 @@ class ChallengeStreakAborted(Exception):
 
 
 HEADERS = {
-    "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
     "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
     "accept-language": "en-US,en;q=0.9",
+    "accept-encoding": "gzip, deflate",
     "cache-control": "no-cache",
+    "connection": "keep-alive",
+    "dnt": "1",
     "pragma": "no-cache",
+    "sec-ch-ua": '"Chromium";v="124", "Google Chrome";v="124", "Not-A.Brand";v="99"',
+    "sec-ch-ua-mobile": "?0",
+    "sec-ch-ua-platform": '"Windows"',
+    "sec-fetch-dest": "document",
+    "sec-fetch-mode": "navigate",
+    "sec-fetch-site": "same-origin",
+    "sec-fetch-user": "?1",
+    "upgrade-insecure-requests": "1",
 }
+
+USER_AGENTS = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+)
 
 # Cloudflare's anti-bot script is embedded on EVERY page served from a
 # CF-fronted origin (including normal album/listing pages), so generic
@@ -134,18 +156,51 @@ class SiteScraper:
         self.cooldown_lock = threading.Lock()
         self.cooldown_until = 0.0
 
-    def _clients(self) -> tuple[Any, Any]:
+    def _rotated_headers(self, referer: str | None = None) -> dict[str, str]:
+        headers = HEADERS.copy()
+        headers["user-agent"] = random.choice(USER_AGENTS)
+        if referer:
+            headers["referer"] = referer
+            headers["sec-fetch-site"] = "same-origin"
+        else:
+            headers["sec-fetch-site"] = "none"
+        if SITE_REFRESH_HEADER and SITE_REFRESH_TOKEN:
+            headers[SITE_REFRESH_HEADER] = SITE_REFRESH_TOKEN
+        return headers
+
+    def _new_cloudscraper(self) -> Any:
+        scraper = cloudscraper.create_scraper(
+            browser={"browser": "chrome", "platform": "windows", "mobile": False}
+        )
+        scraper.headers.update(self._rotated_headers())
+        return scraper
+
+    def _new_requests_session(self) -> requests.Session:
+        session = requests.Session()
+        session.headers.update(self._rotated_headers())
+        return session
+
+    def _clients(self) -> tuple[Any, requests.Session]:
         scraper = getattr(self.client_local, "scraper", None)
-        curl = getattr(self.client_local, "curl", None)
+        session = getattr(self.client_local, "requests_session", None)
         if scraper is None:
-            scraper = cloudscraper.create_scraper(browser={"browser": "chrome", "platform": "darwin", "mobile": False})
-            scraper.headers.update(HEADERS)
+            scraper = self._new_cloudscraper()
             self.client_local.scraper = scraper
-        if curl is None:
-            curl = curl_requests.Session(impersonate="chrome124")
-            curl.headers.update(HEADERS)
-            self.client_local.curl = curl
-        return scraper, curl
+        if session is None:
+            session = self._new_requests_session()
+            self.client_local.requests_session = session
+        return scraper, session
+
+    def reset_session(self) -> None:
+        """Reset per-thread HTTP sessions after limiter responses."""
+        for attr in ("scraper", "requests_session"):
+            client = getattr(self.client_local, attr, None)
+            if client is not None:
+                try:
+                    client.close()
+                except Exception:
+                    pass
+                setattr(self.client_local, attr, None)
 
     def _wait_for_cooldown(self) -> None:
         with self.cooldown_lock:
@@ -178,19 +233,16 @@ class SiteScraper:
         time.sleep(delay)
 
     def _request_once(self, url: str, referer: str | None = None) -> str:
-        headers = HEADERS.copy()
-        if referer:
-            headers["referer"] = referer
-        scraper, curl = self._clients()
+        headers = self._rotated_headers(referer)
+        scraper, session = self._clients()
         errors: list[str] = []
         challenge_count = 0
-        # curl_cffi (chrome impersonation) is more likely to clear Cloudflare's
-        # JS challenge than cloudscraper, so try it first. Continue to the next
-        # client on a challenge or 5xx response — only raise ChallengeError if
-        # ALL clients return a challenge.
+        # Keep this path HTTP-only: cloudscraper first, then a plain requests
+        # session with the same browser-like headers. On limiter responses the
+        # caller resets sessions and backs off before the next attempt.
         for client_name, getter in (
-            ("curl_cffi", lambda: curl.get(url, timeout=30, headers=headers)),
             ("cloudscraper", lambda: scraper.get(url, timeout=30, headers=headers)),
+            ("requests", lambda: session.get(url, timeout=30, headers=headers)),
         ):
             try:
                 response = getter()
@@ -200,10 +252,14 @@ class SiteScraper:
             html = response.text
             if is_challenge_page(html, response.status_code, dict(response.headers)):
                 challenge_count += 1
-                errors.append(f"{client_name}: challenge page (status={response.status_code})")
+                errors.append(f"{client_name}: upstream limiter response")
                 continue
             if response.status_code >= 500:
                 errors.append(f"{client_name}: upstream {response.status_code}")
+                continue
+            if response.status_code in {403, 429}:
+                challenge_count += 1
+                errors.append(f"{client_name}: upstream limiter response")
                 continue
             if response.status_code >= 400:
                 raise FetchError(f"HTTP {response.status_code} for {url}")
@@ -212,17 +268,7 @@ class SiteScraper:
                 continue
             return html
         if challenge_count and challenge_count == len([1 for _ in errors]):
-            if SCRAPER_PLAYWRIGHT_ENABLED:
-                try:
-                    from .playwright_fetch import playwright_page_fetcher
-
-                    html = playwright_page_fetcher.fetch_html(url, referer=referer)
-                    if not is_challenge_page(html, 200, {"content-type": "text/html"}):
-                        return html
-                    errors.append("playwright: challenge page")
-                except Exception as exc:
-                    errors.append(f"playwright: {exc}")
-            raise ChallengeError(f"Challenge page detected for {url} ({'; '.join(errors)})")
+            raise ChallengeError(f"Upstream limiter response for {url} ({'; '.join(errors)})")
         raise FetchError("; ".join(errors) if errors else f"Failed to fetch {url}")
 
     def fetch_html(
@@ -263,17 +309,20 @@ class SiteScraper:
                 return html
             except ChallengeError as exc:
                 last_error = exc
+                self.reset_session()
                 self._trigger_cooldown(kind=kind, attempt=attempt, reason=str(exc))
                 if attempt >= max_attempts:
                     break
                 self._sleep_with_backoff(attempt, base=max(4.0, SCRAPER_RETRY_BASE_DELAY_SECONDS), ceiling=SCRAPER_RETRY_MAX_DELAY_SECONDS)
             except FetchError as exc:
                 last_error = exc
+                self.reset_session()
                 if attempt >= max_attempts:
                     break
                 self._sleep_with_backoff(attempt, base=1.5, ceiling=12.0)
             except Exception as exc:
                 last_error = exc
+                self.reset_session()
                 if attempt >= max_attempts:
                     break
                 self._sleep_with_backoff(attempt, base=1.5, ceiling=12.0)
@@ -400,7 +449,7 @@ class SiteScraper:
                 elif "/browse-by-year/" in absolute and absolute not in years:
                     years.append(absolute)
         except ChallengeError as exc:
-            print("[scrape:index] movie-index landing page challenged; falling back to generated sections")
+            print("[scrape:index] movie-index landing page limited; falling back to generated sections")
             self._record_issue(report, "challenged_pages", phase="movie-index", url=movie_index_url, reason=str(exc))
         except Exception as exc:
             print(f"[scrape:index] movie-index landing page failed: {exc}")
@@ -685,7 +734,7 @@ class SiteScraper:
                     except ChallengeError as exc:
                         counts["albums_failed"] += 1
                         self._record_issue(report, "challenged_albums", phase=phase, url=album_url, reason=str(exc))
-                        print(f"[scrape:{phase}] album challenged {album_url}: {exc}")
+                        print(f"[scrape:{phase}] album limited {album_url}: {exc}")
                         continue
                     except Exception as exc:
                         counts["albums_failed"] += 1
@@ -851,11 +900,11 @@ class SiteScraper:
                     reached_any_page = True
                 except ChallengeError as exc:
                     self._record_issue(report, "challenged_pages", phase="listing", url=page_url, reason=str(exc), page=page_number)
-                    print(f"[scrape:listing] page challenged page={page_number}: {exc}")
+                    print(f"[scrape:listing] page limited page={page_number}: {exc}")
                     if self._check_listing_streak():
                         message = (
                             f"Listing crawl aborted: {self.listing_challenge_streak} "
-                            f"consecutive challenged pages (limit "
+                            f"consecutive limited pages (limit "
                             f"{self.max_listing_challenge_streak})"
                         )
                         print(f"[scrape:listing] {message}")
@@ -991,12 +1040,12 @@ class SiteScraper:
                             page=page_number,
                             section=section_label,
                         )
-                        print(f"[scrape:index] section challenged {section_url} page={page_number}: {exc}")
+                        print(f"[scrape:index] section limited {section_url} page={page_number}: {exc}")
                         if self._check_listing_streak():
                             message = (
                                 f"Movie-index crawl aborted: "
                                 f"{self.listing_challenge_streak} consecutive "
-                                f"challenged pages (limit "
+                                f"limited pages (limit "
                                 f"{self.max_listing_challenge_streak})"
                             )
                             print(f"[scrape:index] {message}")

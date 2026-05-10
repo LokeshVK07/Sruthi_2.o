@@ -14,9 +14,9 @@ apps/api/app/scripts/refresh_catalog.py for the full list.
 
 Notes on safety:
 
-- This wrapper does NOT bypass any anti-bot system. If the upstream returns a
-  Cloudflare challenge page, the page is logged, marked as challenged in the
-  report JSON, and the run continues with the rest of the work.
+- This wrapper does NOT bypass upstream access controls. If the upstream
+  rate-limits the runner, the page is logged in the report JSON and the run
+  continues with the rest of the work.
 - Per-album and per-page failures are isolated; one failure never cancels the
   full run.
 """
