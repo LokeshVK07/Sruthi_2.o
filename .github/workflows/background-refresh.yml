@@ -316,12 +316,15 @@ jobs:
           echo "Refresh start mode: ${start_mode}"
 
       - name: Refresh catalog from MassTamilan
+        id: refresh
         # HTTP-only protected-source scrape. If upstream limits the runner, the
-        # scraper exits non-zero and this job stops before publish/deploy.
+        # scraper exits non-zero with a blocked report; the job then skips
+        # publish/deploy without replacing the current live catalog.
         env:
           PYTHONUNBUFFERED: "1"
         run: |
           set -euo pipefail
+          echo "publish_ready=false" >> "$GITHUB_OUTPUT"
 
           if [[ "${SRUTHI_FULL_REFRESH}" == "true" ]]; then
             export SCRAPER_LISTING_DELAY_SECONDS="8"
@@ -376,7 +379,7 @@ jobs:
           set -e
 
           if [[ $refresh_status -ne 0 ]]; then
-            echo "::error::MassTamilan refresh exited with status ${refresh_status}. Previous live catalog is preserved; deploy/import will not run."
+            echo "::warning::MassTamilan refresh exited with status ${refresh_status}. Previous live catalog is preserved; deploy/import will not run."
             if [[ -f "${REFRESH_REPORT}" ]]; then
               python - <<'PY'
           import json
@@ -400,13 +403,33 @@ jobs:
               "failed_albums": summary.get("failed_albums"),
           }, indent=2, sort_keys=True))
           PY
+              if python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          report = json.loads(Path(os.environ["REFRESH_REPORT"]).read_text(encoding="utf-8"))
+          status = str(report.get("status") or "").lower()
+          if report.get("blocked") or report.get("partial") or status in {"blocked", "partial"}:
+              raise SystemExit(0)
+          raise SystemExit(1)
+          PY
+              then
+                echo "skip_reason=blocked_or_partial_refresh" >> "$GITHUB_OUTPUT"
+                echo "::notice::Refresh was blocked/partial, so publish is skipped and the active catalog remains unchanged."
+                exit 0
+              fi
             fi
+            echo "::error::Unexpected refresh failure without a blocked/partial report."
             exit "$refresh_status"
           fi
 
+          echo "publish_ready=true" >> "$GITHUB_OUTPUT"
+          echo "skip_reason=" >> "$GITHUB_OUTPUT"
           echo "Refresh completed successfully."
 
       - name: Gate refresh report before publish
+        if: steps.refresh.outputs.publish_ready == 'true'
         run: |
           set -euo pipefail
           if [[ ! -f "${REFRESH_REPORT}" ]]; then
@@ -451,6 +474,7 @@ jobs:
           PY
 
       - name: Validate refreshed local catalog files
+        if: steps.refresh.outputs.publish_ready == 'true'
         run: |
           set -euo pipefail
           if [[ ! -f data/sruthi.db ]]; then
@@ -463,6 +487,7 @@ jobs:
           fi
 
       - name: Validate catalog and build release seed
+        if: steps.refresh.outputs.publish_ready == 'true'
         run: |
           set -euo pipefail
           run_prepare_release() {
@@ -498,6 +523,7 @@ jobs:
           fi
 
       - name: Upload build artifacts
+        if: steps.refresh.outputs.publish_ready == 'true'
         uses: actions/upload-artifact@v4
         with:
           name: sruthi-release
@@ -508,6 +534,7 @@ jobs:
             ${{ env.REFRESH_REPORT }}
 
       - name: Import release into inactive D1 slot
+        if: steps.refresh.outputs.publish_ready == 'true'
         run: |
           set -euo pipefail
           npx wrangler d1 execute "${TARGET_DB_NAME}" \
@@ -516,6 +543,7 @@ jobs:
             --config "${GENERATED_WRANGLER_CONFIG}"
 
       - name: Validate inactive D1 slot
+        if: steps.refresh.outputs.publish_ready == 'true'
         run: |
           set -euo pipefail
           npx wrangler d1 execute "${TARGET_DB_NAME}" \
@@ -567,11 +595,13 @@ jobs:
           PY
 
       - name: Deploy Worker after successful import and validation
+        if: steps.refresh.outputs.publish_ready == 'true'
         run: |
           set -euo pipefail
           npx wrangler deploy --config "${GENERATED_WRANGLER_CONFIG}"
 
       - name: Mark deployed D1 slot as active
+        if: steps.refresh.outputs.publish_ready == 'true'
         env:
           GH_TOKEN: ${{ secrets.GH_VARIABLES_TOKEN }}
         run: |
@@ -617,3 +647,12 @@ jobs:
           echo "::error::Failed to update SRUTHI_ACTIVE_D1_SLOT."
           cat /tmp/slot-patch.err
           exit 1
+
+      - name: Report skipped publish
+        if: steps.refresh.outputs.publish_ready != 'true'
+        env:
+          SKIP_REASON: ${{ steps.refresh.outputs.skip_reason }}
+        run: |
+          set -euo pipefail
+          echo "Publish/deploy skipped: ${SKIP_REASON:-refresh_not_publishable}"
+          echo "The previous live D1 slot remains active; no broken or incomplete catalog was deployed."
