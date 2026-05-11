@@ -16,7 +16,7 @@ permissions:
   actions: write
 
 concurrency:
-  group: sruthi-background-refresh-tamil
+  group: vibe2o-background-refresh
   cancel-in-progress: false
 
 defaults:
@@ -25,18 +25,19 @@ defaults:
 
 jobs:
   refresh-and-deploy:
-    name: Refresh and Deploy Tamil
+    name: Refresh and Deploy Vibe 2.o
     runs-on: ubuntu-latest
     timeout-minutes: 90
     env:
       CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
       GH_VARIABLES_TOKEN: ${{ secrets.GH_VARIABLES_TOKEN }}
       CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
-      SRUTHI_ACTIVE_D1_SLOT: ${{ vars.SRUTHI_ACTIVE_D1_SLOT }}
-      SRUTHI_D1_DB_A_ID: ${{ vars.SRUTHI_D1_DB_A_ID }}
-      SRUTHI_D1_DB_A_NAME: ${{ vars.SRUTHI_D1_DB_A_NAME }}
-      SRUTHI_D1_DB_B_ID: ${{ vars.SRUTHI_D1_DB_B_ID }}
-      SRUTHI_D1_DB_B_NAME: ${{ vars.SRUTHI_D1_DB_B_NAME }}
+      ACTIVE_D1_SLOT: ${{ vars.VIBE_ACTIVE_D1_SLOT || vars.SRUTHI_ACTIVE_D1_SLOT }}
+      D1_DB_A_ID: ${{ vars.VIBE_D1_DB_A_ID || vars.SRUTHI_D1_DB_A_ID }}
+      D1_DB_A_NAME: ${{ vars.VIBE_D1_DB_A_NAME || vars.SRUTHI_D1_DB_A_NAME }}
+      D1_DB_B_ID: ${{ vars.VIBE_D1_DB_B_ID || vars.SRUTHI_D1_DB_B_ID }}
+      D1_DB_B_NAME: ${{ vars.VIBE_D1_DB_B_NAME || vars.SRUTHI_D1_DB_B_NAME }}
+      ACTIVE_SLOT_VARIABLE_NAME: VIBE_ACTIVE_D1_SLOT
       WRANGLER_SEND_METRICS: "false"
       WRANGLER_BIN: wrangler
       CI: "true"
@@ -44,11 +45,11 @@ jobs:
       RELEASE_MANIFEST: cloudflare/.generated/release-manifest.json
       RELEASE_DUCKDB: cloudflare/.generated/release-check.duckdb
       REFRESH_REPORT: cloudflare/.generated/refresh-report.json
-      BASELINE_DB: data/sruthi.baseline.sqlite3
-      WORKER_NAME: ${{ vars.WORKER_NAME }}
-      SRUTHI_WORKER_URL: ${{ vars.SRUTHI_WORKER_URL || vars.WORKER_PUBLIC_URL }}
+      BASELINE_DB: data/vibe2o.baseline.sqlite3
+      WORKER_NAME: ${{ vars.VIBE_WORKER_NAME || vars.WORKER_NAME }}
+      WORKER_PUBLIC_URL: ${{ vars.VIBE_WORKER_PUBLIC_URL || vars.SRUTHI_WORKER_URL || vars.WORKER_PUBLIC_URL }}
       SCRAPER_PROJECT_NAME: Vibe 2.o
-      REFRESH_DISCOVERY_MODE: ${{ vars.SRUTHI_REFRESH_MODE || 'pagewise' }}
+      REFRESH_DISCOVERY_MODE: ${{ vars.VIBE_REFRESH_MODE || vars.SRUTHI_REFRESH_MODE || 'all' }}
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
@@ -112,10 +113,10 @@ jobs:
             CLOUDFLARE_API_TOKEN \
             GH_VARIABLES_TOKEN \
             CLOUDFLARE_ACCOUNT_ID \
-            SRUTHI_D1_DB_A_ID \
-            SRUTHI_D1_DB_A_NAME \
-            SRUTHI_D1_DB_B_ID \
-            SRUTHI_D1_DB_B_NAME; do
+            D1_DB_A_ID \
+            D1_DB_A_NAME \
+            D1_DB_B_ID \
+            D1_DB_B_NAME; do
             if [[ -z "${!key:-}" ]]; then
               missing+=("$key")
             fi
@@ -126,26 +127,26 @@ jobs:
             exit 1
           fi
 
-          if [[ "${SRUTHI_D1_DB_A_ID}" == "${SRUTHI_D1_DB_B_ID}" ]]; then
+          if [[ "${D1_DB_A_ID}" == "${D1_DB_B_ID}" ]]; then
             echo "::error::D1 slot A and B database ids must be different."
             exit 1
           fi
 
-          if [[ "${SRUTHI_D1_DB_A_NAME}" == "${SRUTHI_D1_DB_B_NAME}" ]]; then
+          if [[ "${D1_DB_A_NAME}" == "${D1_DB_B_NAME}" ]]; then
             echo "::error::D1 slot A and B database names must be different."
             exit 1
           fi
 
-          if [[ -n "${SRUTHI_ACTIVE_D1_SLOT:-}" && "${SRUTHI_ACTIVE_D1_SLOT}" != "A" && "${SRUTHI_ACTIVE_D1_SLOT}" != "B" ]]; then
-            echo "::error::SRUTHI_ACTIVE_D1_SLOT must be A or B when configured."
+          if [[ -n "${ACTIVE_D1_SLOT:-}" && "${ACTIVE_D1_SLOT}" != "A" && "${ACTIVE_D1_SLOT}" != "B" ]]; then
+            echo "::error::VIBE_ACTIVE_D1_SLOT must be A or B when configured."
             exit 1
           fi
-          if [[ -n "${SRUTHI_WORKER_URL:-}" && ! "${SRUTHI_WORKER_URL}" =~ ^https?:// ]]; then
-            echo "::error::SRUTHI_WORKER_URL must start with http:// or https:// when configured."
+          if [[ -n "${WORKER_PUBLIC_URL:-}" && ! "${WORKER_PUBLIC_URL}" =~ ^https?:// ]]; then
+            echo "::error::VIBE_WORKER_PUBLIC_URL must start with http:// or https:// when configured."
             exit 1
           fi
           if [[ "${REFRESH_DISCOVERY_MODE}" != "pagewise" && "${REFRESH_DISCOVERY_MODE}" != "movie-index" && "${REFRESH_DISCOVERY_MODE}" != "all" ]]; then
-            echo "::error::SRUTHI_REFRESH_MODE must be one of: pagewise, movie-index, all."
+            echo "::error::VIBE_REFRESH_MODE must be one of: pagewise, movie-index, all."
             exit 1
           fi
 
@@ -154,7 +155,7 @@ jobs:
           import sys
           import uuid
 
-          for key in ("SRUTHI_D1_DB_A_ID", "SRUTHI_D1_DB_B_ID"):
+          for key in ("D1_DB_A_ID", "D1_DB_B_ID"):
               try:
                   uuid.UUID(os.environ[key])
               except ValueError:
@@ -201,7 +202,7 @@ jobs:
           if [[ "${SCRAPER_FULL_REFRESH:-false}" == "true" ]]; then
             full_refresh="true"
           fi
-          echo "SRUTHI_FULL_REFRESH=${full_refresh}" >> "$GITHUB_ENV"
+          echo "VIBE_FULL_REFRESH=${full_refresh}" >> "$GITHUB_ENV"
 
       - name: Verify Cloudflare token and account access
         run: |
@@ -215,15 +216,15 @@ jobs:
       - name: Select inactive D1 slot
         run: |
           set -euo pipefail
-          active="${SRUTHI_ACTIVE_D1_SLOT:-A}"
+          active="${ACTIVE_D1_SLOT:-A}"
           if [[ "$active" == "A" ]]; then
             target="B"
-            db_id="${SRUTHI_D1_DB_B_ID}"
-            db_name="${SRUTHI_D1_DB_B_NAME}"
+            db_id="${D1_DB_B_ID}"
+            db_name="${D1_DB_B_NAME}"
           else
             target="A"
-            db_id="${SRUTHI_D1_DB_A_ID}"
-            db_name="${SRUTHI_D1_DB_A_NAME}"
+            db_id="${D1_DB_A_ID}"
+            db_name="${D1_DB_A_NAME}"
           fi
 
           echo "TARGET_DB_ID=$db_id" >> "$GITHUB_ENV"
@@ -253,14 +254,14 @@ jobs:
           fi
 
           set +e
-          gh api "repos/${GITHUB_REPOSITORY}/actions/variables/SRUTHI_ACTIVE_D1_SLOT" >/tmp/slot-var.json 2>/tmp/slot-var.err
+          gh api "repos/${GITHUB_REPOSITORY}/actions/variables/${ACTIVE_SLOT_VARIABLE_NAME}" >/tmp/slot-var.json 2>/tmp/slot-var.err
           status=$?
           set -e
 
           if [[ $status -eq 0 ]]; then
-            echo "Verified repository variable API access for SRUTHI_ACTIVE_D1_SLOT."
+            echo "Verified repository variable API access for ${ACTIVE_SLOT_VARIABLE_NAME}."
           elif grep -q "404" /tmp/slot-var.err; then
-            echo "SRUTHI_ACTIVE_D1_SLOT does not exist yet; workflow will create it after a successful deploy."
+            echo "${ACTIVE_SLOT_VARIABLE_NAME} does not exist yet; workflow will create it after a successful deploy."
           else
             echo "::error::GH_VARIABLES_TOKEN does not have the required repository variables access."
             cat /tmp/slot-var.err
@@ -300,8 +301,8 @@ jobs:
         run: |
           set -euo pipefail
           for slot in A B; do
-            name_key="SRUTHI_D1_DB_${slot}_NAME"
-            id_key="SRUTHI_D1_DB_${slot}_ID"
+            name_key="D1_DB_${slot}_NAME"
+            id_key="D1_DB_${slot}_ID"
             db_name="${!name_key}"
             db_id="${!id_key}"
             echo "Checking D1 slot ${slot}: ${db_name} (${db_id})"
@@ -330,7 +331,7 @@ jobs:
           fi
           mkdir -p "$(dirname "$dst")"
           cp "$src" "$dst"
-          if [[ "${SRUTHI_FULL_REFRESH}" == "true" ]]; then
+          if [[ "${VIBE_FULL_REFRESH}" == "true" ]]; then
             rm -f data/sruthi.db data/sruthi.db-wal data/sruthi.db-shm
             start_mode="fresh full source crawl"
           else
@@ -361,7 +362,21 @@ jobs:
           set -euo pipefail
           echo "publish_ready=false" >> "$GITHUB_OUTPUT"
 
-          if [[ "${SRUTHI_FULL_REFRESH}" == "true" ]]; then
+          workers="${SCRAPER_WORKERS:-}"
+          if [[ -z "$workers" ]]; then
+            workers="$(python -c 'import os; print(max(4, os.cpu_count() or 4))')"
+          fi
+          if ! [[ "$workers" =~ ^[0-9]+$ ]] || (( workers < 1 )); then
+            echo "::error::SCRAPER_WORKERS must be a positive integer, got '${workers}'."
+            exit 1
+          fi
+          batch_size="${SCRAPER_BATCH_SIZE:-$(( workers * 4 ))}"
+          if ! [[ "$batch_size" =~ ^[0-9]+$ ]] || (( batch_size < 1 )); then
+            echo "::error::SCRAPER_BATCH_SIZE must be a positive integer, got '${batch_size}'."
+            exit 1
+          fi
+
+          if [[ "${VIBE_FULL_REFRESH}" == "true" ]]; then
             export SCRAPER_LISTING_DELAY_SECONDS="8"
             export SCRAPER_DETAIL_DELAY_SECONDS="3"
             export SCRAPER_JITTER_SECONDS="2"
@@ -372,13 +387,12 @@ jobs:
             export SCRAPER_LIMITER_MAX_COOLDOWN_SECONDS="300"
             export SCRAPER_MAX_LIMITER_STREAK="4"
             export SCRAPER_ABORT_ON_PAGE1_LIMITED="true"
-            workers="${SCRAPER_WORKERS:-1}"
             mode_label="FULL ${REFRESH_DISCOVERY_MODE^^} DISCOVERY"
             args=(
               --full
               --mode "${REFRESH_DISCOVERY_MODE}"
               --workers "${workers}"
-              --batch-size 3
+              --batch-size "${batch_size}"
               --page-delay "${SCRAPER_LISTING_DELAY_SECONDS}"
               --album-delay "${SCRAPER_DETAIL_DELAY_SECONDS}"
               --retry-count "${SCRAPER_MAX_ATTEMPTS}"
@@ -401,12 +415,11 @@ jobs:
             export SCRAPER_LIMITER_MAX_COOLDOWN_SECONDS="180"
             export SCRAPER_MAX_LIMITER_STREAK="3"
             export SCRAPER_ABORT_ON_PAGE1_LIMITED="true"
-            workers="${SCRAPER_WORKERS:-1}"
             mode_label="INCREMENTAL ${REFRESH_DISCOVERY_MODE^^} DISCOVERY"
             args=(
               --mode "${REFRESH_DISCOVERY_MODE}"
               --workers "${workers}"
-              --batch-size 3
+              --batch-size "${batch_size}"
               --page-delay "${SCRAPER_LISTING_DELAY_SECONDS}"
               --album-delay "${SCRAPER_DETAIL_DELAY_SECONDS}"
               --retry-count "${SCRAPER_MAX_ATTEMPTS}"
@@ -424,7 +437,7 @@ jobs:
           echo "  mode                  = $mode_label"
           echo "  discovery mode        = $REFRESH_DISCOVERY_MODE"
           echo "  workers               = $workers"
-          echo "  batch_size            = 3"
+          echo "  batch_size            = $batch_size"
           echo "  listing delay (s)     = $SCRAPER_LISTING_DELAY_SECONDS"
           echo "  detail delay (s)      = $SCRAPER_DETAIL_DELAY_SECONDS"
           echo "  jitter max (s)        = $SCRAPER_JITTER_SECONDS"
@@ -600,7 +613,7 @@ jobs:
         if: steps.refresh.outputs.publish_ready == 'true'
         uses: actions/upload-artifact@v4
         with:
-          name: sruthi-release
+          name: vibe2o-release
           if-no-files-found: error
           path: |
             cloudflare/data/schema.sql
@@ -637,18 +650,18 @@ jobs:
           wrangler deploy --config "${GENERATED_WRANGLER_CONFIG}"
 
       - name: Validate deployed Worker
-        if: steps.refresh.outputs.publish_ready == 'true' && env.SRUTHI_WORKER_URL != ''
+        if: steps.refresh.outputs.publish_ready == 'true' && env.WORKER_PUBLIC_URL != ''
         run: |
           set -euo pipefail
           python cloudflare/scripts/validate_release.py \
             --mode http \
-            --url "${SRUTHI_WORKER_URL}" \
+            --url "${WORKER_PUBLIC_URL}" \
             --baseline cloudflare/data/release-baseline.json
 
       - name: Report skipped deployed Worker validation
-        if: steps.refresh.outputs.publish_ready == 'true' && env.SRUTHI_WORKER_URL == ''
+        if: steps.refresh.outputs.publish_ready == 'true' && env.WORKER_PUBLIC_URL == ''
         run: |
-          echo "::notice::SRUTHI_WORKER_URL is not configured, so post-deploy HTTP smoke validation was skipped."
+          echo "::notice::VIBE_WORKER_PUBLIC_URL is not configured, so post-deploy HTTP smoke validation was skipped."
 
       - name: Mark deployed D1 slot as active
         if: steps.refresh.outputs.publish_ready == 'true'
@@ -667,34 +680,34 @@ jobs:
             exit 1
           fi
 
-          echo "Updating SRUTHI_ACTIVE_D1_SLOT to '${TARGET_SLOT}'."
+          echo "Updating ${ACTIVE_SLOT_VARIABLE_NAME} to '${TARGET_SLOT}'."
 
           set +e
           gh api \
             --method PATCH \
-            "repos/${GITHUB_REPOSITORY}/actions/variables/SRUTHI_ACTIVE_D1_SLOT" \
-            -f name=SRUTHI_ACTIVE_D1_SLOT \
+            "repos/${GITHUB_REPOSITORY}/actions/variables/${ACTIVE_SLOT_VARIABLE_NAME}" \
+            -f name="${ACTIVE_SLOT_VARIABLE_NAME}" \
             -f value="${TARGET_SLOT}" >/tmp/slot-patch.out 2>/tmp/slot-patch.err
           patch_status=$?
           set -e
 
           if [[ $patch_status -eq 0 ]]; then
-            echo "Updated SRUTHI_ACTIVE_D1_SLOT successfully."
+            echo "Updated ${ACTIVE_SLOT_VARIABLE_NAME} successfully."
             exit 0
           fi
 
           if grep -q "404" /tmp/slot-patch.err; then
-            echo "SRUTHI_ACTIVE_D1_SLOT does not exist yet. Creating it now."
+            echo "${ACTIVE_SLOT_VARIABLE_NAME} does not exist yet. Creating it now."
             gh api \
               --method POST \
               "repos/${GITHUB_REPOSITORY}/actions/variables" \
-              -f name=SRUTHI_ACTIVE_D1_SLOT \
+              -f name="${ACTIVE_SLOT_VARIABLE_NAME}" \
               -f value="${TARGET_SLOT}" >/tmp/slot-create.out 2>/tmp/slot-create.err
-            echo "Created SRUTHI_ACTIVE_D1_SLOT successfully."
+            echo "Created ${ACTIVE_SLOT_VARIABLE_NAME} successfully."
             exit 0
           fi
 
-          echo "::error::Failed to update SRUTHI_ACTIVE_D1_SLOT."
+          echo "::error::Failed to update ${ACTIVE_SLOT_VARIABLE_NAME}."
           cat /tmp/slot-patch.err
           exit 1
 

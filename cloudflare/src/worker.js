@@ -1,5 +1,5 @@
 /**
- * Sruthi 2.o — Cloudflare Worker
+ * Vibe 2.o — Cloudflare Worker
  *
  * Free public host for the catalogue browser:
  *   - Static frontend served via the `assets` binding (cloudflare/public/).

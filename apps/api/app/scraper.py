@@ -102,7 +102,6 @@ USER_AGENTS = (
 STRONG_CHALLENGE_MARKERS = (
     "just a moment",
     "checking your browser",
-    "cloudflare",
     "captcha",
     "rate limit",
     "too many requests",
@@ -949,15 +948,18 @@ class SiteScraper:
                     reached_any_page = True
                 except ChallengeError as exc:
                     self._record_issue(report, "challenged_pages", phase="listing", url=page_url, reason=str(exc), page=page_number)
-                    print(f"[scrape:listing] page limited page={page_number}: {exc}")
                     if page_number == page_from == 1 and not reached_any_page and self.abort_on_page1_limited:
                         message = "Listing crawl aborted: page 1 remained limited after bounded retries"
-                        print(f"[scrape:listing] {message}")
+                        print(
+                            "[scrape:listing] Source limited page 1 from this GitHub runner; "
+                            "skipping publish and preserving the current live catalog."
+                        )
                         if report is not None:
                             report.setdefault("warnings", []).append(message)
                             report["blocked"] = True
                             report["partial"] = True
                         raise RuntimeError(message)
+                    print(f"[scrape:listing] page limited page={page_number}: {exc}")
                     if self._check_listing_streak():
                         message = (
                             f"Listing crawl aborted: {self.listing_challenge_streak} "

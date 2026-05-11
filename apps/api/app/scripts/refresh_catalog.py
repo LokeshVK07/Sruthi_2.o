@@ -354,9 +354,9 @@ def main() -> None:
 
     project_name = os.getenv("SCRAPER_PROJECT_NAME", "Vibe 2.o")
 
-    # In this CLI, "all" means tag/category pattern discovery
-    # (/tag/0-9, /tag/A, ...), not the plain /tamil-songs listing.
-    run_pagewise = args.mode == "pagewise" and not args.skip_pagewise
+    # For Vibe 2.o, "all" mirrors the older production refresh shape:
+    # scan the plain /tamil-songs listing and the movie index before publish.
+    run_pagewise = args.mode in {"all", "pagewise"} and not args.skip_pagewise
     run_movie_index = args.mode in {"all", "movie-index"} and not args.skip_movie_index
 
     log_info("============================================================")
@@ -479,12 +479,15 @@ def main() -> None:
             report["blocked"] = True
             report["partial"] = True
             report["status"] = "blocked"
+            log_prefix = "NOTICE"
         elif report.get("partial"):
             report["status"] = "partial"
+            log_prefix = "NOTICE"
         else:
             report["status"] = "failed"
+            log_prefix = "ERROR"
         report["errors"].append(str(exc))
-        print(f"ERROR - {exc}", file=sys.stderr)
+        print(f"{log_prefix} - {exc}", file=sys.stderr)
     finally:
         report["finishedAt"] = iso_now()
         report["durationSeconds"] = round(time.monotonic() - started_at, 2)

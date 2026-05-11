@@ -1,8 +1,8 @@
 {
-  "name": "sruthi-2o-cloudflare",
+  "name": "vibe2o-cloudflare",
   "private": true,
   "version": "0.1.0",
-  "description": "Free Cloudflare Workers + Pages + D1 deploy target for Sruthi 2.o",
+  "description": "Free Cloudflare Workers + Pages + D1 deploy target for Vibe 2.o",
   "scripts": {
     "export": "python3 scripts/export_d1_sql.py --db ../apps/api/data/melodify.sqlite3 --out data/seed.sql",
     "seed:remote": "wrangler d1 execute sruthi-catalog --remote --file=data/seed.sql",
