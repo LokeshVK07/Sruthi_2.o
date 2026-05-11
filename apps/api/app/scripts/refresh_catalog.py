@@ -56,6 +56,12 @@ def _load_retry_album_urls(path: Path) -> list[str]:
 
 def _ensure_progress(report: dict[str, Any]) -> None:
     summary = report["summary"]
+    if (
+        report.get("blocked")
+        or int(summary.get("challenged_pages", 0) or 0)
+        or int(summary.get("challenged_albums", 0) or 0)
+    ):
+        return
     processed_pages = (
         summary["listing_pages_scanned"]
         + summary["movie_index_pages_scanned"]
@@ -79,7 +85,7 @@ def _ensure_publishable(report: dict[str, Any]) -> None:
         report["blocked"] = True
         report["partial"] = True
         raise RuntimeError(
-            "Refresh blocked by upstream limiter; preserving previous catalog "
+            "Refresh blocked by source limiter; preserving previous catalog "
             f"(limited_pages={limited_pages}, limited_albums={limited_albums})"
         )
     if failed_pages or failed_albums:
@@ -230,7 +236,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--page-delay", type=float, default=None, help="Legacy alias for --listing-delay.")
     parser.add_argument("--album-delay", type=float, default=None, help="Legacy alias for --detail-delay.")
     parser.add_argument("--jitter", type=float, default=None, help="Maximum random jitter (seconds) added to scraper sleeps.")
-    parser.add_argument("--limiter-cooldown", type=float, default=None, help="Base shared cooldown after an upstream limiter response.")
+    parser.add_argument("--limiter-cooldown", type=float, default=None, help="Base shared cooldown after a source limiter response.")
     parser.add_argument("--retry-count", type=int, default=None, help="Maximum HTTP attempts per source page.")
     parser.add_argument("--retry-base-delay", type=float, default=None, help="Base retry/backoff delay in seconds.")
     parser.add_argument("--retry-max-delay", type=float, default=None, help="Maximum retry/backoff delay in seconds.")
@@ -351,6 +357,7 @@ def main() -> None:
     started_at = time.monotonic()
     exit_code = 0
     summaries: list[ScrapeSummary] = []
+    source_blocked_early = False
 
     project_name = os.getenv("SCRAPER_PROJECT_NAME", "Vibe 2.o")
 
@@ -412,8 +419,13 @@ def main() -> None:
                     message = f"Page-wise refresh failed: {exc}"
                     report["warnings"].append(message)
                     print(f"WARN - {message}")
+                    source_blocked_early = bool(report.get("blocked"))
 
-            if run_movie_index:
+            if run_movie_index and source_blocked_early:
+                message = "Skipped secondary discovery because source limited page 1 from this runner."
+                report["warnings"].append(message)
+                print(f"NOTICE - {message}")
+            elif run_movie_index:
                 log_info(f"[2/4] Discovering albums using '{args.mode}' mode...")
                 try:
                     max_section_pages = None if args.full or args.mode == "all" else 2

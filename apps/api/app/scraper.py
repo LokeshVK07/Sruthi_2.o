@@ -256,7 +256,7 @@ class SiteScraper:
                 return
             self.cooldown_until = until
         print(
-            f"[scrape] upstream limiter hit during {kind}; "
+            f"[scrape] source limiter during {kind}; "
             f"streak={limiter_hit_count}; cooling down for {cooldown:.1f}s ({reason})"
         )
 
@@ -292,14 +292,14 @@ class SiteScraper:
             html = response.text
             if is_challenge_page(html, response.status_code, dict(response.headers)):
                 challenge_count += 1
-                errors.append(f"{client_name}: upstream limiter response")
+                errors.append(f"{client_name}: source limiter response")
                 continue
             if response.status_code >= 500:
                 errors.append(f"{client_name}: upstream {response.status_code}")
                 continue
             if response.status_code in {403, 429}:
                 challenge_count += 1
-                errors.append(f"{client_name}: upstream limiter response")
+                errors.append(f"{client_name}: source limiter response")
                 continue
             if response.status_code >= 400:
                 raise FetchError(f"HTTP {response.status_code} for {url}")
@@ -308,7 +308,7 @@ class SiteScraper:
                 continue
             return html
         if challenge_count and challenge_count == len([1 for _ in errors]):
-            raise ChallengeError(f"Upstream limiter response for {url} ({'; '.join(errors)})")
+            raise ChallengeError(f"Source limiter response for {url} ({'; '.join(errors)})")
         raise FetchError("; ".join(errors) if errors else f"Failed to fetch {url}")
 
     def fetch_html(
