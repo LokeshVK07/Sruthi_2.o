@@ -1,4 +1,4 @@
-name: Background Refresh Tamil
+name: Background Refresh Vibe 2.o
 
 on:
   workflow_dispatch:
@@ -47,6 +47,8 @@ jobs:
       BASELINE_DB: data/sruthi.baseline.sqlite3
       WORKER_NAME: ${{ vars.WORKER_NAME }}
       SRUTHI_WORKER_URL: ${{ vars.SRUTHI_WORKER_URL || vars.WORKER_PUBLIC_URL }}
+      SCRAPER_PROJECT_NAME: Vibe 2.o
+      REFRESH_DISCOVERY_MODE: ${{ vars.SRUTHI_REFRESH_MODE || 'pagewise' }}
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
@@ -140,6 +142,10 @@ jobs:
           fi
           if [[ -n "${SRUTHI_WORKER_URL:-}" && ! "${SRUTHI_WORKER_URL}" =~ ^https?:// ]]; then
             echo "::error::SRUTHI_WORKER_URL must start with http:// or https:// when configured."
+            exit 1
+          fi
+          if [[ "${REFRESH_DISCOVERY_MODE}" != "pagewise" && "${REFRESH_DISCOVERY_MODE}" != "movie-index" && "${REFRESH_DISCOVERY_MODE}" != "all" ]]; then
+            echo "::error::SRUTHI_REFRESH_MODE must be one of: pagewise, movie-index, all."
             exit 1
           fi
 
@@ -367,10 +373,10 @@ jobs:
             export SCRAPER_MAX_LIMITER_STREAK="4"
             export SCRAPER_ABORT_ON_PAGE1_LIMITED="true"
             workers="${SCRAPER_WORKERS:-1}"
-            mode_label="FULL ALL CATEGORY DISCOVERY"
+            mode_label="FULL ${REFRESH_DISCOVERY_MODE^^} DISCOVERY"
             args=(
               --full
-              --mode all
+              --mode "${REFRESH_DISCOVERY_MODE}"
               --workers "${workers}"
               --batch-size 3
               --page-delay "${SCRAPER_LISTING_DELAY_SECONDS}"
@@ -396,9 +402,9 @@ jobs:
             export SCRAPER_MAX_LIMITER_STREAK="3"
             export SCRAPER_ABORT_ON_PAGE1_LIMITED="true"
             workers="${SCRAPER_WORKERS:-1}"
-            mode_label="INCREMENTAL ALL CATEGORY DISCOVERY"
+            mode_label="INCREMENTAL ${REFRESH_DISCOVERY_MODE^^} DISCOVERY"
             args=(
-              --mode all
+              --mode "${REFRESH_DISCOVERY_MODE}"
               --workers "${workers}"
               --batch-size 3
               --page-delay "${SCRAPER_LISTING_DELAY_SECONDS}"
@@ -416,6 +422,7 @@ jobs:
 
           echo "::group::Refresh configuration"
           echo "  mode                  = $mode_label"
+          echo "  discovery mode        = $REFRESH_DISCOVERY_MODE"
           echo "  workers               = $workers"
           echo "  batch_size            = 3"
           echo "  listing delay (s)     = $SCRAPER_LISTING_DELAY_SECONDS"

@@ -227,8 +227,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--delay", type=float, default=None, help="(Deprecated) generic per-fetch delay; use --listing-delay/--detail-delay.")
     parser.add_argument("--listing-delay", type=float, default=None, help="Polite delay (seconds) between listing-page fetches.")
     parser.add_argument("--detail-delay", type=float, default=None, help="Polite delay (seconds) between album-detail fetches.")
-    parser.add_argument("--page-delay", type=float, default=None, help="isaibox-compatible alias for --listing-delay.")
-    parser.add_argument("--album-delay", type=float, default=None, help="isaibox-compatible alias for --detail-delay.")
+    parser.add_argument("--page-delay", type=float, default=None, help="Legacy alias for --listing-delay.")
+    parser.add_argument("--album-delay", type=float, default=None, help="Legacy alias for --detail-delay.")
     parser.add_argument("--jitter", type=float, default=None, help="Maximum random jitter (seconds) added to scraper sleeps.")
     parser.add_argument("--limiter-cooldown", type=float, default=None, help="Base shared cooldown after an upstream limiter response.")
     parser.add_argument("--retry-count", type=int, default=None, help="Maximum HTTP attempts per source page.")
@@ -244,7 +244,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--origin", default=None, help="Override source origin, e.g. https://www.masstamilan.dev.")
     parser.add_argument("--listing-path", default=None, help="Override listing path, e.g. /tamil-songs.")
     parser.add_argument("--movie-index-path", default=None, help="Override movie-index path, e.g. /movie-index.")
-    parser.add_argument("--include-tag-index", action="store_true", help="Accepted for isaibox compatibility; tag sections are already included.")
+    parser.add_argument("--include-tag-index", action="store_true", help="Accepted for legacy compatibility; tag sections are already included.")
     parser.add_argument("--abort-on-page1-limited", action=argparse.BooleanOptionalAction, default=None, help="Abort safely if listing page 1 remains limited after retries.")
     parser.add_argument(
         "--max-challenge-streak",
@@ -352,15 +352,17 @@ def main() -> None:
     exit_code = 0
     summaries: list[ScrapeSummary] = []
 
-    # In the isaibox scraper, "all" means tag/category pattern discovery
+    project_name = os.getenv("SCRAPER_PROJECT_NAME", "Vibe 2.o")
+
+    # In this CLI, "all" means tag/category pattern discovery
     # (/tag/0-9, /tag/A, ...), not the plain /tamil-songs listing.
     run_pagewise = args.mode == "pagewise" and not args.skip_pagewise
     run_movie_index = args.mode in {"all", "movie-index"} and not args.skip_movie_index
 
     log_info("============================================================")
-    log_info(f"isaibox standalone scraper - MODE: {args.mode.upper()}")
+    log_info(f"{project_name} MassTamilan scraper - MODE: {args.mode.upper()}")
     log_info("============================================================")
-    log_info("[1/4] Connecting to DuckDB...")
+    log_info("[1/4] Connecting to SQLite catalog...")
 
     try:
         if args.retry_failed_only:
