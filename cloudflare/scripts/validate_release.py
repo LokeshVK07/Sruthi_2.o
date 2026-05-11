@@ -20,6 +20,7 @@ import argparse
 import json
 import os
 import shlex
+import ssl
 import subprocess
 import sys
 import urllib.request
@@ -123,7 +124,14 @@ def validate_d1(args: argparse.Namespace) -> int:
 
 def http_get_json(url: str, timeout: int = 30) -> dict:
     request = urllib.request.Request(url, headers={"User-Agent": "sruthi-release-validate/1"})
-    with urllib.request.urlopen(request, timeout=timeout) as response:
+    context = None
+    try:
+        import certifi  # type: ignore[import-not-found]
+
+        context = ssl.create_default_context(cafile=certifi.where())
+    except ImportError:
+        pass
+    with urllib.request.urlopen(request, timeout=timeout, context=context) as response:
         body = response.read().decode("utf-8")
     return json.loads(body)
 
