@@ -408,7 +408,9 @@ jobs:
             export SCRAPER_LISTING_DELAY_SECONDS="4"
             export SCRAPER_DETAIL_DELAY_SECONDS="2"
             export SCRAPER_JITTER_SECONDS="1.5"
-            export SCRAPER_MAX_ATTEMPTS="2"
+            # Incremental runs use page 1 as the source gate: one bounded
+            # attempt, then continue only if the source responds from this runner.
+            export SCRAPER_MAX_ATTEMPTS="1"
             export SCRAPER_RETRY_BASE_DELAY_SECONDS="6"
             export SCRAPER_RETRY_MAX_DELAY_SECONDS="30"
             export SCRAPER_LIMITER_COOLDOWN_SECONDS="45"
