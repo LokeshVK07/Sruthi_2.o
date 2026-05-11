@@ -47,11 +47,27 @@ def main() -> int:
     parser.add_argument("--data-dir", type=Path, default=DEFAULT_DATA_DIR)
     parser.add_argument("--source-db", type=Path, default=None,
                         help="Optional SQLite path to cross-check counts against")
+    parser.add_argument("--baseline", type=Path, default=None,
+                        help="Optional release-baseline.json with min_albums, min_songs, and min_url_coverage")
     parser.add_argument("--min-albums", type=int, default=DEFAULT_MIN_ALBUMS)
     parser.add_argument("--min-songs", type=int, default=DEFAULT_MIN_SONGS)
     parser.add_argument("--min-url-coverage", type=float, default=0.99,
                         help="Fraction of sampled songs that must have a URL")
     args = parser.parse_args()
+
+    if args.baseline:
+        baseline_path = args.baseline.resolve()
+        if not baseline_path.exists():
+            return fail([f"--baseline not found: {baseline_path}"])
+        try:
+            baseline = json.loads(baseline_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError as exc:
+            return fail([f"--baseline is not valid JSON: {exc}"])
+        args.min_albums = int(baseline.get("min_albums", args.min_albums))
+        args.min_songs = int(baseline.get("min_songs", args.min_songs))
+        args.min_url_coverage = float(
+            baseline.get("min_url_coverage", args.min_url_coverage)
+        )
 
     data_dir = args.data_dir.resolve()
     if not data_dir.is_dir():

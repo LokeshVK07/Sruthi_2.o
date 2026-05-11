@@ -23,23 +23,10 @@ from __future__ import annotations
 
 import argparse
 import json
-import re
 import sys
 from pathlib import Path
 
-
-def strip_jsonc_comments(text: str) -> str:
-    """Remove `//` and `/* */` comments so the file parses with json.loads.
-
-    Wrangler accepts JSONC (JSON with comments); Python's json module does
-    not. This is a deliberately conservative stripper — it does not try to
-    handle comment markers inside strings, but our wrangler.jsonc never has
-    those.
-    """
-    no_block = re.sub(r"/\*.*?\*/", "", text, flags=re.DOTALL)
-    no_line = re.sub(r"(?m)^\s*//.*$", "", no_block)
-    no_inline = re.sub(r"\s+//[^\n]*", "", no_line)
-    return no_inline
+from jsonc_utils import load_jsonc
 
 
 def absolutise(path_str: str, base_dir: Path) -> str:
@@ -48,6 +35,17 @@ def absolutise(path_str: str, base_dir: Path) -> str:
     if not candidate.is_absolute():
         candidate = (base_dir / candidate).resolve()
     return str(candidate)
+
+
+def validate_path(label: str, path_str: str, expect_dir: bool) -> None:
+    path = Path(path_str)
+    if expect_dir:
+        if not path.is_dir():
+            raise ValueError(f"{label} does not exist or is not a directory: {path}")
+        if not any(path.iterdir()):
+            raise ValueError(f"{label} is empty: {path}")
+    elif not path.is_file():
+        raise ValueError(f"{label} does not exist or is not a file: {path}")
 
 
 def main() -> int:
@@ -70,9 +68,8 @@ def main() -> int:
         return 2
 
     base_dir = base_path.parent
-    raw = base_path.read_text(encoding="utf-8")
     try:
-        config = json.loads(strip_jsonc_comments(raw))
+        config = load_jsonc(base_path)
     except json.JSONDecodeError as exc:
         print(f"error: failed to parse {base_path} as JSONC: {exc}", file=sys.stderr)
         return 2
@@ -83,6 +80,13 @@ def main() -> int:
         config["assets"] = {}
     asset_dir = args.assets_directory or config["assets"].get("directory", "./public")
     config["assets"]["directory"] = absolutise(asset_dir, base_dir)
+
+    try:
+        validate_path("main", config["main"], expect_dir=False)
+        validate_path("assets.directory", config["assets"]["directory"], expect_dir=True)
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
 
     if args.worker_name:
         config["name"] = args.worker_name

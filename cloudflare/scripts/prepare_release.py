@@ -93,26 +93,35 @@ def check_named_entries(db_path: Path, baseline: dict) -> list[str]:
     return problems
 
 
-def duckdb_cross_check(sqlite_path: Path, duckdb_path: Path, expected: dict[str, int]) -> str | None:
-    """Use DuckDB to re-count from the SQLite. Returns an error message or None."""
+def duckdb_cross_check(data_dir: Path, duckdb_path: Path, expected: dict[str, int]) -> str | None:
+    """Use DuckDB to re-count generated NDJSON without downloading extensions."""
     try:
         import duckdb  # type: ignore[import-untyped]
     except ImportError:
         return "duckdb is not installed in this environment"
+
+    albums_path = data_dir / "albums.ndjson"
+    songs_path = data_dir / "songs.ndjson"
+    if not albums_path.exists():
+        return f"generated albums.ndjson missing: {albums_path}"
+    if not songs_path.exists():
+        return f"generated songs.ndjson missing: {songs_path}"
 
     duckdb_path.parent.mkdir(parents=True, exist_ok=True)
     if duckdb_path.exists():
         duckdb_path.unlink()
     con = duckdb.connect(str(duckdb_path))
     try:
-        try:
-            con.execute("INSTALL sqlite_scanner;")
-        except duckdb.Error:
-            pass
-        con.execute("LOAD sqlite_scanner;")
-        con.execute(f"ATTACH '{sqlite_path}' AS source (TYPE sqlite, READ_ONLY);")
-        duck_albums = con.execute("SELECT COUNT(*) FROM source.albums").fetchone()[0]
-        duck_songs = con.execute("SELECT COUNT(*) FROM source.songs").fetchone()[0]
+        duck_albums = con.execute(
+            "SELECT COUNT(*) FROM read_json_auto(?)",
+            [str(albums_path)],
+        ).fetchone()[0]
+        duck_songs = con.execute(
+            "SELECT COUNT(*) FROM read_json_auto(?)",
+            [str(songs_path)],
+        ).fetchone()[0]
+    except duckdb.Error as exc:
+        return f"DuckDB query failed: {exc}"
     finally:
         con.close()
     if duck_albums != expected["albums"]:
@@ -206,7 +215,7 @@ def main() -> int:
 
     duckdb_error: str | None = None
     if args.duckdb_path:
-        duckdb_error = duckdb_cross_check(args.db, args.duckdb_path, counts)
+        duckdb_error = duckdb_cross_check(args.seed.parent, args.duckdb_path, counts)
         if duckdb_error:
             # Cross-check disagreement is treated as a hard failure; that's
             # the whole point of running it.

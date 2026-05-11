@@ -11,16 +11,11 @@ from __future__ import annotations
 
 import argparse
 import json
-import re
 import sys
 import uuid
 from pathlib import Path
 
-
-def strip_jsonc_comments(text: str) -> str:
-    no_block = re.sub(r"/\*.*?\*/", "", text, flags=re.DOTALL)
-    no_line = re.sub(r"(?m)^\s*//.*$", "", no_block)
-    return re.sub(r"\s+//[^\n]*", "", no_line)
+from jsonc_utils import load_jsonc
 
 
 def fail(messages: list[str]) -> int:
@@ -38,15 +33,19 @@ def main() -> int:
         action="store_true",
         help="Fail if d1_databases[0].database_id is missing or a placeholder",
     )
+    parser.add_argument(
+        "--require-account-id",
+        action="store_true",
+        help="Fail if top-level account_id is missing",
+    )
     args = parser.parse_args()
 
     config_path = Path(args.config).resolve()
     if not config_path.exists():
         return fail([f"config not found: {config_path}"])
 
-    raw = config_path.read_text(encoding="utf-8")
     try:
-        config = json.loads(strip_jsonc_comments(raw))
+        config = load_jsonc(config_path)
     except json.JSONDecodeError as exc:
         return fail([f"could not parse {config_path}: {exc}"])
 
@@ -74,6 +73,8 @@ def main() -> int:
             problems.append(f"assets.directory not found: {assets_dir}")
         elif not any(assets_dir.iterdir()):
             problems.append(f"assets.directory is empty: {assets_dir}")
+        elif not (assets_dir / "index.html").is_file():
+            problems.append(f"assets.directory is missing index.html: {assets_dir}")
 
     bindings = config.get("d1_databases") or []
     if not bindings:
@@ -82,6 +83,8 @@ def main() -> int:
         first = bindings[0]
         if not first.get("binding"):
             problems.append("d1_databases[0].binding is missing")
+        if not first.get("database_name"):
+            problems.append("d1_databases[0].database_name is missing")
         if args.require_database_id:
             db_id = (first.get("database_id") or "").strip()
             if not db_id or "REPLACE" in db_id.upper():
@@ -94,6 +97,8 @@ def main() -> int:
 
     if not config.get("name"):
         problems.append("Worker name (top-level 'name') is missing")
+    if args.require_account_id and not config.get("account_id"):
+        problems.append("account_id is missing")
 
     if problems:
         return fail(problems)
