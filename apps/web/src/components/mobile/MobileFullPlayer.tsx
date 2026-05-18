@@ -14,7 +14,6 @@ import {
 } from "lucide-react";
 import type { Song } from "../../types";
 import type { RepeatMode } from "../../store";
-import AbstractCover from "../AbstractCover";
 
 type MobileFullPlayerProps = {
   open: boolean;
@@ -55,7 +54,7 @@ export default function MobileFullPlayer(props: MobileFullPlayerProps) {
   const {
     open,
     song,
-    artwork: _artwork,
+    artwork,
     currentTime,
     duration,
     volume,
@@ -107,7 +106,7 @@ export default function MobileFullPlayer(props: MobileFullPlayerProps) {
           </button>
         </div>
 
-        <AbstractCover seed={song.id || song.title} size="hero" className="mobile-full-player__artwork" />
+        <img className="mobile-full-player__artwork" src={artwork} alt={song.title} />
 
         <div className="mobile-full-player__copy">
           <strong title={song.title}>{song.title}</strong>

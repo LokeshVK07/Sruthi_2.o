@@ -1,6 +1,5 @@
 import { Trash2, X, ChevronUp, ChevronDown, GripVertical } from "lucide-react";
 import type { Song } from "../../types";
-import AbstractCover from "../AbstractCover";
 
 type MobileQueueSheetProps = {
   open: boolean;
@@ -15,7 +14,7 @@ type MobileQueueSheetProps = {
 };
 
 function formatTime(seconds?: number | null) {
-  if (!seconds || seconds <= 0) return "—:—";
+  if (!seconds || seconds <= 0) return "";
   const mins = Math.floor(seconds / 60);
   const secs = Math.floor(seconds % 60);
   return `${mins}:${String(secs).padStart(2, "0")}`;
@@ -25,7 +24,7 @@ export default function MobileQueueSheet({
   open,
   queue,
   currentSongId,
-  fallbackArt: _fallbackArt,
+  fallbackArt,
   onClose,
   onPlay,
   onClear,
@@ -50,7 +49,7 @@ export default function MobileQueueSheet({
           {queue.map((song, index) => (
             <div key={`${song.id}-${index}`} className={song.id === currentSongId ? "mobile-queue-row is-active" : "mobile-queue-row"}>
               <button type="button" className="mobile-queue-row__main" onClick={() => onPlay(song)}>
-                <AbstractCover seed={song.id || song.title} size="sm" className="mobile-artwork" />
+                <img src={song.artworkUrl || fallbackArt} alt={song.title} />
                 <div className="mobile-queue-row__copy">
                   <strong title={song.title}>{song.title}</strong>
                   <span title={song.artist}>{song.artist}</span>

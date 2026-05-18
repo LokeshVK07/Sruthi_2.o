@@ -1,5 +1,5 @@
 import type { LucideIcon } from "lucide-react";
-import { Download, Heart, History, Leaf, Moon, Music2, Plus, Radio, Sprout, Waves } from "lucide-react";
+import { ChevronDown, Heart, Plus } from "lucide-react";
 
 export type NavKey = "home" | "search" | "library" | "favorites" | "playlists" | "albums" | "artists";
 
@@ -38,31 +38,18 @@ export default function Sidebar({
   onPlaylistClick,
   onCreatePlaylist
 }: SidebarProps) {
-  const libraryItems = [
-    { key: "favorites" as const, label: "Favorites", icon: Heart, onClick: onFavoritesClick },
-    { key: "recent" as const, label: "Recently Played", icon: History, onClick: () => onNavChange("library") },
-    { key: "downloaded" as const, label: "Downloaded", icon: Download, onClick: () => onNavChange("library") },
-    { key: "new" as const, label: "New Playlist", icon: Plus, onClick: onCreatePlaylist },
-  ];
-  const browseItems = [
-    { label: "Focus", icon: Radio },
-    { label: "Relax", icon: Waves },
-    { label: "Nature", icon: Sprout },
-    { label: "Sleep", icon: Moon },
-  ];
-
   return (
     <aside className="sidebar">
       <div className="sidebar__brand">
         <div className="sidebar__logo">
-          <Leaf size={24} />
+          <img src="/Icon.png" alt="Vibe 2.o" />
         </div>
         <div>
-          <strong>ViBe 2.o</strong>
+          <strong>Vibe 2.o</strong>
+          <span>Premium music player</span>
         </div>
       </div>
 
-      <div className="sidebar__section-label">MAIN</div>
       <nav className="sidebar__nav">
         {navItems.map((item) => {
           const Icon = item.icon;
@@ -84,65 +71,44 @@ export default function Sidebar({
       <section className="sidebar__library">
         <div className="sidebar__section-label">YOUR LIBRARY</div>
         <div className="sidebar__library-list">
-          {libraryItems.map((item) => {
-            const Icon = item.icon;
-            return (
-              <button
-                key={item.key}
-                className={item.key === "favorites" && activeNav === "favorites" ? "sidebar__library-item is-active" : "sidebar__library-item"}
-                onClick={item.onClick}
-              >
-                <span className="sidebar__library-icon">
-                  <Icon size={17} />
-                </span>
-                <span>{item.label}</span>
-                {item.key === "favorites" ? <small>{favoriteCount}</small> : null}
-              </button>
-            );
-          })}
-          {playlists.slice(0, 3).map((playlist) => (
-            <button
-              key={playlist.id}
-              className={selectedPlaylistId === playlist.id ? "sidebar__library-item is-active" : "sidebar__library-item"}
-              onClick={() => onPlaylistClick(playlist.id)}
-            >
+          <button className={activeNav === "favorites" ? "sidebar__library-item is-active" : "sidebar__library-item"} onClick={onFavoritesClick}>
+            <div className="sidebar__library-item-main">
               <span className="sidebar__library-icon">
-                <Music2 size={16} />
+                <Heart size={15} />
               </span>
-              <span>{playlist.name}</span>
-              <small>{playlist.count}</small>
-            </button>
-          ))}
+              <div>
+                <strong>Favorites</strong>
+                <span>{favoriteCount} songs</span>
+              </div>
+            </div>
+          </button>
+          {playlists.length ? (
+            <div className="sidebar__playlist-list">
+              {playlists.map((playlist) => (
+                <button
+                  key={playlist.id}
+                  className={selectedPlaylistId === playlist.id ? "sidebar__library-item is-active" : "sidebar__library-item"}
+                  onClick={() => onPlaylistClick(playlist.id)}
+                >
+                  <div className="sidebar__library-item-main">
+                    <div>
+                      <strong>{playlist.name}</strong>
+                      <span>{playlist.count} songs</span>
+                    </div>
+                  </div>
+                  <ChevronDown size={15} />
+                </button>
+              ))}
+            </div>
+          ) : (
+            <div className="sidebar__library-empty">Create a playlist to keep your own mix here.</div>
+          )}
         </div>
+        <button className="sidebar__playlist-button" onClick={onCreatePlaylist}>
+          <Plus size={16} />
+          New Playlist
+        </button>
       </section>
-
-      <section className="sidebar__browse">
-        <div className="sidebar__section-label">BROWSE</div>
-        {browseItems.map((item) => {
-          const Icon = item.icon;
-          return (
-            <button key={item.label} className="sidebar__library-item" onClick={() => onNavChange("library")}>
-              <span className="sidebar__library-icon">
-                <Icon size={17} />
-              </span>
-              <span>{item.label}</span>
-            </button>
-          );
-        })}
-      </section>
-
-      <button className="sidebar__breath-card" type="button" onClick={() => onNavChange("library")}>
-        <span className="sidebar__breath-icon">
-          <Sprout size={48} />
-        </span>
-        <span>
-          <strong>Take a breath</strong>
-          <small>Nature sounds to calm your mind.</small>
-        </span>
-        <span className="sidebar__breath-play">
-          <Music2 size={16} />
-        </span>
-      </button>
     </aside>
   );
 }

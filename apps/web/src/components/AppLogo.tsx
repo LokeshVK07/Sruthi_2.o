@@ -4,17 +4,17 @@ type AppLogoProps = {
 };
 
 /**
- * Renders the bundled ViBe artwork at the given pixel size. Re-uses the
- * existing public asset so the brand mark stays consistent across favicon,
- * install icon, and in-app header.
+ * Renders the bundled Vibe 2.o app icon (apps/web/public/Icon.png) at the
+ * given pixel size. Re-uses the existing public asset so the brand mark stays
+ * consistent across favicon, install icon, and in-app header.
  */
 export default function AppLogo({ size = 36, className }: AppLogoProps) {
   return (
     <img
-      src="/Sruthi_kutty.jpg"
+      src="/Icon.png"
       width={size}
       height={size}
-      alt="ViBe 2.o"
+      alt="Vibe 2.o"
       className={className}
       style={{ borderRadius: size * 0.28, flex: "0 0 auto" }}
     />

@@ -157,14 +157,11 @@
 .mobile-result-row img,
 .mobile-queue-row__main img,
 .mobile-mini-player img,
-.mobile-album-hero img,
-.mobile-artwork {
+.mobile-album-hero img {
   width: 72px;
   height: 72px;
   border-radius: 18px;
   object-fit: cover;
-  object-position: top center;
-  background: var(--panel, #fbfaf5);
   flex: 0 0 auto;
 }
 
@@ -251,8 +248,7 @@
   text-align: left;
 }
 
-.mobile-favorite-card img,
-.mobile-favorite-card .mobile-artwork {
+.mobile-favorite-card img {
   width: 100%;
   height: auto;
   aspect-ratio: 1 / 1;
@@ -396,9 +392,7 @@
   margin: 0 auto 18px;
   border-radius: 28px;
   object-fit: cover;
-  object-position: top center;
-  background: var(--panel, #fbfaf5);
-  box-shadow: 0 22px 52px rgba(35, 55, 45, 0.16);
+  box-shadow: 0 22px 52px rgba(0, 0, 0, 0.36);
 }
 
 .mobile-full-player__copy {

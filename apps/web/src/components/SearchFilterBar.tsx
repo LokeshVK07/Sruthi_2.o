@@ -1,5 +1,4 @@
 import { Filter, Grid2x2, List, RefreshCw, Search } from "lucide-react";
-import type { RefObject } from "react";
 import type { RefreshStatus } from "../types";
 
 type FilterKey = "all" | "tracks" | "albums" | "artists" | "playlists";
@@ -12,7 +11,6 @@ type SearchFilterBarProps = {
   filterOpen: boolean;
   refreshState?: RefreshStatus | null;
   refreshPending?: boolean;
-  inputRef?: RefObject<HTMLInputElement | null>;
   onQueryChange: (value: string) => void;
   onToggleFilter: () => void;
   onSelectFilter: (filter: FilterKey) => void;
@@ -29,7 +27,6 @@ export default function SearchFilterBar({
   filterOpen,
   refreshState,
   refreshPending,
-  inputRef,
   onQueryChange,
   onToggleFilter,
   onSelectFilter,
@@ -65,7 +62,7 @@ export default function SearchFilterBar({
     <section className="search-filter-bar">
       <label className="search-filter-bar__input">
         <Search size={16} />
-        <input ref={inputRef} value={query} onChange={(event) => onQueryChange(event.target.value)} placeholder="Search for songs, artists, albums..." />
+        <input value={query} onChange={(event) => onQueryChange(event.target.value)} placeholder="Search tracks, albums, artists..." />
       </label>
 
       <div className="search-filter-bar__actions">

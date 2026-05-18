@@ -1,6 +1,5 @@
 import { ChevronLeft, Play, Shuffle } from "lucide-react";
 import type { AlbumDetail, Song } from "../../types";
-import AbstractCover from "../AbstractCover";
 
 type MobileAlbumDetailProps = {
   album: AlbumDetail;
@@ -9,7 +8,7 @@ type MobileAlbumDetailProps = {
   onPlayTrack: (track: Song, sourceQueue?: Song[]) => void;
 };
 
-export default function MobileAlbumDetail({ album, fallbackArt: _fallbackArt, onBack, onPlayTrack }: MobileAlbumDetailProps) {
+export default function MobileAlbumDetail({ album, fallbackArt, onBack, onPlayTrack }: MobileAlbumDetailProps) {
   return (
     <div className="mobile-screen">
       <div className="mobile-screen__header">
@@ -25,7 +24,7 @@ export default function MobileAlbumDetail({ album, fallbackArt: _fallbackArt, on
       </div>
 
       <div className="mobile-album-hero">
-        <AbstractCover seed={album.albumId || album.name} size="lg" className="mobile-artwork" />
+        <img src={album.imageUrl || fallbackArt} alt={album.name} />
         <div>
           <strong>{album.name}</strong>
           <span>{album.musicDirector || album.singersSummary || "Tamil soundtrack"}</span>

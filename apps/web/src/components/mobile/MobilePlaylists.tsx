@@ -1,6 +1,5 @@
 import { ChevronLeft, Pencil, Plus, Trash2 } from "lucide-react";
 import type { Song } from "../../types";
-import AbstractCover from "../AbstractCover";
 
 type PlaylistSummary = { id: string; name: string; count: number };
 
@@ -52,7 +51,7 @@ export default function MobilePlaylists({
         <div className="mobile-recent-list">
           {selectedPlaylistSongs.length ? selectedPlaylistSongs.map((song) => (
             <button key={song.id} type="button" className="mobile-song-row" onClick={() => onPlaySong(song, selectedPlaylistSongs)}>
-              <AbstractCover seed={song.id || song.title} size="sm" className="mobile-artwork" />
+              <img src={song.artworkUrl || ""} alt={song.title} />
               <div className="mobile-song-row__copy">
                 <strong>{song.title}</strong>
                 <span>{song.artist}</span>

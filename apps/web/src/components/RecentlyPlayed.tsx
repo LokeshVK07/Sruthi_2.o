@@ -1,6 +1,5 @@
 import { ChevronRight, Play } from "lucide-react";
 import type { Song } from "../types";
-import AbstractCover from "./AbstractCover";
 
 type ViewMode = "grid" | "list";
 type Layout = "grid" | "row";
@@ -55,7 +54,7 @@ export default function RecentlyPlayed({
               onMouseEnter={() => onPrefetchTrack?.(track)}
             >
               <div className="recent-card__media">
-                <AbstractCover seed={track.id || track.title} size="md" active={track.id === currentTrackId} />
+                <img src={track.artworkUrl || fallbackArt} alt={track.title} loading="lazy" decoding="async" />
                 <span className="recent-card__play" aria-hidden="true">
                   <Play size={12} />
                 </span>

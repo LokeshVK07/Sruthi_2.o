@@ -1,6 +1,5 @@
 import { Search, X, Loader2 } from "lucide-react";
 import type { Album, ComposerCollection, Song } from "../../types";
-import AbstractCover from "../AbstractCover";
 
 type FilterKey = "all" | "tracks" | "albums" | "artists" | "playlists";
 
@@ -50,7 +49,7 @@ export default function MobileSearch({
   artists,
   composers,
   playlists,
-  fallbackArt: _fallbackArt,
+  fallbackArt,
   onQueryChange,
   onClose,
   onSelectFilter,
@@ -161,7 +160,7 @@ export default function MobileSearch({
           <h2>Tracks</h2>
           {songs.slice(0, 30).map((song) => (
             <button key={song.id} type="button" className="mobile-result-row" onClick={() => onPlaySong(song)}>
-              <AbstractCover seed={song.id || song.title} size="sm" className="mobile-artwork" />
+              <img src={song.artworkUrl || fallbackArt} alt={song.title} loading="lazy" />
               <div>
                 <strong>{song.title}</strong>
                 <span>{song.artist}</span>
@@ -181,7 +180,7 @@ export default function MobileSearch({
               className="mobile-result-row"
               onClick={() => onOpenAlbum(album.albumId)}
             >
-              <AbstractCover seed={album.albumId || album.name} size="sm" className="mobile-artwork" />
+              <img src={album.imageUrl || fallbackArt} alt={album.name} loading="lazy" />
               <div>
                 <strong>{album.name}</strong>
                 <span>{album.musicDirector || album.singersSummary || "Album"}</span>

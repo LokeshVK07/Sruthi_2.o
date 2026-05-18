@@ -5,13 +5,6 @@ export type Song = {
   albumTitle: string;
   albumId: string;
   artworkUrl?: string | null;
-  albumArtUrl?: string | null;
-  imageUrl?: string | null;
-  image_url?: string | null;
-  coverUrl?: string | null;
-  cover_url?: string | null;
-  thumbnail?: string | null;
-  album_art?: string | null;
   audioUrl?: string;
   streamUrl: string;
   favorite?: boolean;
@@ -30,13 +23,6 @@ export type Album = {
   musicDirector?: string | null;
   singersSummary?: string | null;
   imageUrl?: string | null;
-  image_url?: string | null;
-  coverUrl?: string | null;
-  cover_url?: string | null;
-  artworkUrl?: string | null;
-  albumArtUrl?: string | null;
-  thumbnail?: string | null;
-  album_art?: string | null;
   language?: string | null;
   trackCount: number;
   updatedAt?: string;

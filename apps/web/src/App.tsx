@@ -1,6 +1,6 @@
 import { startTransition, useEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Bell, Clock3, Heart, Home, Library, ListMusic, Menu, MoreHorizontal, Plus, Search, Users } from "lucide-react";
+import { Home, Library, ListMusic, Menu, Search, Users } from "lucide-react";
 import { apiClient } from "./api";
 import { useDebounce } from "./hooks/useDebounce";
 import { normalizeSearchText } from "./searchUtils";
@@ -10,16 +10,11 @@ import SearchFilterBar from "./components/SearchFilterBar";
 import RecentlyPlayed from "./components/RecentlyPlayed";
 import QueuePanel from "./components/QueuePanel";
 import PlaylistModal from "./components/PlaylistModal";
-import KeyboardShortcutsModal from "./components/KeyboardShortcutsModal";
-import AbstractCover from "./components/AbstractCover";
-import BottomPlayer from "./components/BottomPlayer";
 import MobileLayout from "./components/mobile/MobileLayout";
 import type { MobileLibrarySection } from "./components/mobile/MobileLayout";
 import type { MobileTabKey } from "./components/mobile/MobileBottomNav";
-import { useKeyboardShortcuts } from "./hooks/useKeyboardShortcuts";
 import { usePlayerStore } from "./store";
 import type { Album, AlbumDetail, ComposerCollection, ComposerDetail, HomeResponse, RefreshStatus, Song } from "./types";
-import { fallbackArt, imageForAlbum } from "./utils/artwork";
 
 type FilterKey = "all" | "tracks" | "albums" | "artists" | "playlists";
 type ViewMode = "grid" | "list";
@@ -33,28 +28,15 @@ type UiPlaylist = {
   name: string;
   trackIds: string[];
 };
-type HomePlaylistCard = {
-  id: string;
-  name: string;
-  count: number;
-  coverUrl: string | null;
-  kind: "favorites" | "playlist";
-};
-
-type StoredPlaylistShape = {
-  id: string;
-  name: string;
-  songIds: string[];
-};
 
 const MAX_RECENTLY_PLAYED = 50;
 const RECENTLY_PLAYED_STORAGE_KEY = "sruthi_recently_played";
 const MOBILE_SEARCH_HISTORY_KEY = "vibe2_search_history";
-const PLAYLISTS_KEY = "sruthi-playlists";
-const QUEUE_KEY = "sruthi-queue";
-const QUEUE_SNAPSHOT_KEY = "sruthi-queue-snapshot";
-const APP_NAME = "ViBe 2.o";
+const APP_NAME = "Vibe 2.o";
 const DEV_PLAYBACK_LOG = import.meta.env.DEV;
+
+const fallbackArt =
+  "data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 800 800'><defs><linearGradient id='g' x1='0%' y1='0%' x2='100%' y2='100%'><stop offset='0%' stop-color='%23191343'/><stop offset='45%' stop-color='%235320bf'/><stop offset='100%' stop-color='%23e668ff'/></linearGradient></defs><rect width='800' height='800' rx='44' fill='url(%23g)'/><circle cx='602' cy='170' r='164' fill='rgba(255,255,255,0.1)'/><circle cx='208' cy='625' r='185' fill='rgba(255,255,255,0.08)'/><path d='M518 168v296c0 30-24 55-69 71-34 12-78 11-98-4-21-14-18-39 6-54 22-14 55-20 84-16V245l166-36v211c0 31-24 56-69 72-35 12-78 11-99-4-21-15-17-39 7-54 21-14 54-20 84-16V168h-12Z' fill='white' fill-opacity='.9'/></svg>";
 
 const navItems = [
   { key: "home", label: "Home", icon: Home },
@@ -66,6 +48,10 @@ const navItems = [
 
 function safeDuration(song?: Song | null) {
   return song?.durationSeconds && song.durationSeconds > 0 ? song.durationSeconds : 240;
+}
+
+function imageFor(song?: Song | null) {
+  return song?.artworkUrl || fallbackArt;
 }
 
 function songStreamUrl(song: Song) {
@@ -121,27 +107,6 @@ function updateRecentlyPlayedList(previous: Song[], track: Song) {
   return [track, ...withoutDuplicate].slice(0, MAX_RECENTLY_PLAYED);
 }
 
-function uniqueById(songs: Song[]) {
-  const seen = new Set<string>();
-  return songs.filter((song) => {
-    if (!song?.id || seen.has(song.id)) return false;
-    seen.add(song.id);
-    return true;
-  });
-}
-
-function readStoredTracks(key: string, limit = MAX_RECENTLY_PLAYED): Song[] {
-  if (typeof window === "undefined") return [];
-  try {
-    const parsed = JSON.parse(window.localStorage.getItem(key) || "[]");
-    if (!Array.isArray(parsed)) return [];
-    return parsed.filter(isValidTrack).slice(0, limit);
-  } catch {
-    window.localStorage.removeItem(key);
-    return [];
-  }
-}
-
 async function safePlay(audio: HTMLAudioElement) {
   try {
     await audio.play();
@@ -167,8 +132,6 @@ export default function App() {
   const [filterOpen, setFilterOpen] = useState(false);
   const [viewMode, setViewMode] = useState<ViewMode>("grid");
   const [playlistModalOpen, setPlaylistModalOpen] = useState(false);
-  const [shortcutModalOpen, setShortcutModalOpen] = useState(false);
-  const [desktopQueueOpen, setDesktopQueueOpen] = useState(true);
   const [newPlaylistName, setNewPlaylistName] = useState("");
   const [customPlaylists, setCustomPlaylists] = useState<UiPlaylist[]>([]);
   const [isMuted, setIsMuted] = useState(false);
@@ -178,8 +141,8 @@ export default function App() {
   const [heroMenuOpen, setHeroMenuOpen] = useState(false);
   const [expandedSection, setExpandedSection] = useState<"favorites" | "recent" | null>(null);
   const [heroFeedback, setHeroFeedback] = useState<string | null>(null);
-  const [recentlyPlayed, setRecentlyPlayed] = useState<Song[]>(() => readStoredTracks(RECENTLY_PLAYED_STORAGE_KEY));
-  const [recentlyPlayedHydrated, setRecentlyPlayedHydrated] = useState(() => typeof window !== "undefined");
+  const [recentlyPlayed, setRecentlyPlayed] = useState<Song[]>([]);
+  const [recentlyPlayedHydrated, setRecentlyPlayedHydrated] = useState(false);
   const [isMobileViewport, setIsMobileViewport] = useState(() => (typeof window !== "undefined" ? window.innerWidth <= 640 : false));
   const [mobileTab, setMobileTab] = useState<MobileTabKey>("home");
   const [mobileLibrarySection, setMobileLibrarySection] = useState<MobileLibrarySection>("favorites");
@@ -193,8 +156,6 @@ export default function App() {
   const [selectedComposerSlug, setSelectedComposerSlug] = useState<string | null>(null);
   const [playlistTargetTrack, setPlaylistTargetTrack] = useState<Song | null>(null);
   const [recentSearches, setRecentSearches] = useState<string[]>([]);
-  const searchInputRef = useRef<HTMLInputElement | null>(null);
-  const queueHydratedRef = useRef(false);
   // Debounced version of `searchQuery` for the heavy work (filtering 28k+
   // songs, hitting /api/search). The visible <input> stays bound to
   // `searchQuery`, so typing is instant; only filtering/queries lag by ~200ms.
@@ -238,7 +199,7 @@ export default function App() {
   // types another character), so we never paint stale results.
   const { data: searchData, isFetching: isSearchFetching } = useQuery({
     queryKey: ["search-all", debouncedQuery],
-    queryFn: () => apiClient.searchAll(debouncedQuery, 30),
+    queryFn: ({ signal }) => apiClient.searchAll(debouncedQuery, 30, signal),
     enabled: debouncedQuery.length > 0,
     staleTime: 30_000,
     placeholderData: (previous) => previous,
@@ -288,39 +249,12 @@ export default function App() {
   const favoriteSongs = favorites?.items?.length ? favorites.items : home?.favorites ?? [];
   const albumItems = albums?.items ?? [];
   const fullLibrary = librarySongs.length ? librarySongs : home?.library ?? [];
-  const albumLookup = useMemo(() => {
-    const map = new Map<string, Album>();
-    for (const album of albumItems) map.set(album.albumId, album);
-    return map;
-  }, [albumItems]);
   const songLookup = useMemo(() => {
     const map = new Map<string, Song>();
     for (const song of fullLibrary) map.set(song.id, song);
     for (const song of favoriteSongs) if (!map.has(song.id)) map.set(song.id, song);
     return map;
   }, [fullLibrary, favoriteSongs]);
-  const withLatestSongMetadata = (song: Song | null | undefined): Song | null => {
-    if (!song) return null;
-    const latest = songLookup.get(song.id);
-    const album = albumLookup.get((latest ?? song).albumId);
-    const albumArt = imageForAlbum(album ?? null);
-    const albumArtUrl = albumArt !== fallbackArt ? albumArt : null;
-    return {
-      ...song,
-      ...(latest ?? {}),
-      artworkUrl: latest?.artworkUrl || song.artworkUrl || albumArtUrl,
-      albumArtUrl: latest?.albumArtUrl || song.albumArtUrl || albumArtUrl,
-      imageUrl: latest?.imageUrl || song.imageUrl || albumArtUrl,
-      image_url: latest?.image_url || song.image_url || albumArtUrl,
-      coverUrl: latest?.coverUrl || song.coverUrl || albumArtUrl,
-      cover_url: latest?.cover_url || song.cover_url || albumArtUrl,
-      album_art: latest?.album_art || song.album_art || albumArtUrl,
-    };
-  };
-  const enrichedQueue = useMemo(
-    () => queue.map((song) => withLatestSongMetadata(song) ?? song),
-    [queue, songLookup, albumLookup],
-  );
   const searchSongResults = useMemo(() => {
     if (!debouncedQuery) return [];
     const backendItems = searchData?.tracks ?? [];
@@ -338,6 +272,10 @@ export default function App() {
   const searchAlbumResults = useMemo(() => searchData?.albums ?? [], [searchData?.albums]);
   const searchArtistResults = useMemo(() => searchData?.artists ?? [], [searchData?.artists]);
   const searchComposerResults = useMemo(() => searchData?.composers ?? [], [searchData?.composers]);
+  const currentSong = useMemo(
+    () => queue[currentIndex] ?? pickInitialSong(fullLibrary),
+    [queue, currentIndex, fullLibrary]
+  );
   const recentSongs = useMemo(
     () =>
       recentlyPlayed
@@ -345,10 +283,6 @@ export default function App() {
         .slice(0, MAX_RECENTLY_PLAYED),
     [recentlyPlayed, songLookup]
   );
-  const currentSong = useMemo(() => {
-    const queuedSong = enrichedQueue[currentIndex] ?? null;
-    return queuedSong ?? recentSongs[0] ?? pickInitialSong(fullLibrary);
-  }, [enrichedQueue, currentIndex, recentSongs, fullLibrary]);
   const artistItems = home?.artists ?? [];
   const filteredRecentSongs = useMemo(() => recentSongs.filter((song) => titleMatches(song, debouncedQuery)), [recentSongs, debouncedQuery]);
   const filteredFavoriteSongs = useMemo(() => favoriteSongs.filter((song) => titleMatches(song, debouncedQuery)), [favoriteSongs, debouncedQuery]);
@@ -364,30 +298,6 @@ export default function App() {
     () => customPlaylists.map((playlist) => ({ id: playlist.id, name: playlist.name, count: playlist.trackIds.length })),
     [customPlaylists]
   );
-  const homePlaylistCards = useMemo<HomePlaylistCard[]>(() => {
-    const cards: HomePlaylistCard[] = [
-      {
-        id: "favorites",
-        name: "Favorites",
-        count: favoriteSongs.length,
-        coverUrl: null,
-        kind: "favorites",
-      },
-    ];
-
-    for (const playlist of customPlaylists) {
-      cards.push({
-        id: playlist.id,
-        name: playlist.name,
-        count: playlist.trackIds.length,
-        coverUrl: null,
-        kind: "playlist",
-      });
-    }
-
-    return cards;
-  }, [customPlaylists, favoriteSongs, songLookup]);
-  const homeComposerCards = useMemo(() => (composersData?.items ?? []).slice(0, 8), [composersData?.items]);
 
   const getDeck = (index: number) => (index === 0 ? deckARef.current : deckBRef.current);
   const getActiveDeck = () => getDeck(activeDeckIndex);
@@ -511,7 +421,7 @@ export default function App() {
       updateRecentlyPlayed(track);
     }
     if (autoPlay) {
-      window.setTimeout(() => schedulePlaybackPrefetches(track, scopedQueue), 300);
+      schedulePlaybackPrefetches(track, scopedQueue);
     }
     setHeroMenuOpen(false);
   }
@@ -638,7 +548,7 @@ export default function App() {
   });
 
   const recordPlayback = useMutation<{ ok: boolean }, Error, string>({
-    mutationFn: () => apiClient.recordPlayback(),
+    mutationFn: (songId: string) => apiClient.recordPlayback(songId),
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: ["home"] });
     }
@@ -667,7 +577,18 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    setRecentlyPlayedHydrated(true);
+    try {
+      const raw = window.localStorage.getItem(RECENTLY_PLAYED_STORAGE_KEY);
+      if (!raw) return;
+      const parsed = JSON.parse(raw);
+      if (!Array.isArray(parsed)) return;
+      const validTracks = parsed.filter(isValidTrack).slice(0, MAX_RECENTLY_PLAYED);
+      setRecentlyPlayed(validTracks);
+    } catch {
+      window.localStorage.removeItem(RECENTLY_PLAYED_STORAGE_KEY);
+    } finally {
+      setRecentlyPlayedHydrated(true);
+    }
   }, []);
 
   useEffect(() => {
@@ -682,17 +603,6 @@ export default function App() {
       // ignore storage failures
     }
   }, [recentlyPlayed]);
-
-  useEffect(() => {
-    const snapshotQueue = readStoredTracks(QUEUE_SNAPSHOT_KEY, 100);
-    if (!snapshotQueue.length) return;
-    setQueue(snapshotQueue, 0, false);
-    const firstPlayable = snapshotQueue[0];
-    if (firstPlayable) {
-      requestSongPrefetch(snapshotQueue.slice(0, 8).map((song) => song.id));
-      requestAlbumPrefetch(firstPlayable.albumId, 8, true);
-    }
-  }, [setQueue]);
 
   useEffect(() => {
     try {
@@ -716,40 +626,6 @@ export default function App() {
   }, [recentSearches]);
 
   useEffect(() => {
-    try {
-      const raw = window.localStorage.getItem(PLAYLISTS_KEY);
-      if (!raw) return;
-      const parsed = JSON.parse(raw);
-      if (!Array.isArray(parsed)) return;
-      setCustomPlaylists(
-        parsed
-          .filter(
-            (item): item is StoredPlaylistShape =>
-              item && typeof item.id === "string" && typeof item.name === "string" && Array.isArray(item.songIds),
-          )
-          .map((item) => ({
-            id: item.id,
-            name: item.name,
-            trackIds: item.songIds.filter((trackId): trackId is string => typeof trackId === "string"),
-          })),
-      );
-    } catch {
-      window.localStorage.removeItem(PLAYLISTS_KEY);
-    }
-  }, []);
-
-  useEffect(() => {
-    try {
-      window.localStorage.setItem(
-        PLAYLISTS_KEY,
-        JSON.stringify(customPlaylists.map((playlist) => ({ id: playlist.id, name: playlist.name, songIds: playlist.trackIds }))),
-      );
-    } catch {
-      // ignore storage failures
-    }
-  }, [customPlaylists]);
-
-  useEffect(() => {
     const activeDeck = getActiveDeck();
     const inactiveDeck = getInactiveDeck();
     if (activeDeck) {
@@ -763,66 +639,21 @@ export default function App() {
   }, [volume, isMuted, activeDeckIndex]);
 
   useEffect(() => {
-    if (queueHydratedRef.current || !fullLibrary.length) return;
-    queueHydratedRef.current = true;
-    try {
-      const raw = window.localStorage.getItem(QUEUE_KEY);
-      if (!raw) return;
-      const parsed = JSON.parse(raw);
-      if (!Array.isArray(parsed) || !parsed.length) return;
-      const restoredQueue = parsed
-        .map((songId) => fullLibrary.find((song) => song.id === songId))
-        .filter((song): song is Song => Boolean(song));
-      if (restoredQueue.length) {
-        setQueue(restoredQueue, 0, false);
-      }
-    } catch {
-      window.localStorage.removeItem(QUEUE_KEY);
-    }
-  }, [fullLibrary, setQueue]);
-
-  useEffect(() => {
-    if (!queueHydratedRef.current) return;
-    try {
-      window.localStorage.setItem(QUEUE_KEY, JSON.stringify(queue.map((song) => song.id)));
-      if (queue.length) {
-        window.localStorage.setItem(QUEUE_SNAPSHOT_KEY, JSON.stringify(queue.slice(0, 100)));
-      }
-    } catch {
-      // ignore storage failures
-    }
-  }, [queue]);
-
-  useEffect(() => {
     if (warmedUpRef.current || !fullLibrary.length) return;
     warmedUpRef.current = true;
     warmup.mutate(48);
     const initial = pickInitialSong(fullLibrary);
     if (!initial) return;
-    if (queueHydratedRef.current && queue.length) return;
     const initialQueue = queueFromAlbum(initial.albumId, fullLibrary);
     setQueue(initialQueue, Math.max(0, initialQueue.findIndex((song) => song.id === initial.id)), false);
-    window.setTimeout(() => {
-      requestSongPrefetch(fullLibrary.slice(0, 8).map((song) => song.id));
-      albumItems.slice(0, 3).forEach((album) => requestAlbumPrefetch(album.albumId, 4, false));
-    }, 250);
-  }, [fullLibrary, albumItems, queue.length, setQueue]);
+    requestSongPrefetch(fullLibrary.slice(0, 8).map((song) => song.id));
+    albumItems.slice(0, 3).forEach((album) => requestAlbumPrefetch(album.albumId, 4, false));
+  }, [fullLibrary.length, albumItems]);
 
   useEffect(() => {
     if (!selectedAlbumId) return;
     requestAlbumPrefetch(selectedAlbumId, 8, true);
   }, [selectedAlbumId]);
-
-  useEffect(() => {
-    const prioritySongs = uniqueById([...recentSongs.slice(0, 8), ...favoriteSongs.slice(0, 8), ...enrichedQueue.slice(0, 8)]).slice(0, 8);
-    if (!prioritySongs.length) return;
-    const timer = window.setTimeout(() => {
-      requestSongPrefetch(prioritySongs.map((song) => song.id));
-      const leadSong = prioritySongs[0];
-      if (leadSong) requestAlbumPrefetch(leadSong.albumId, 8, true);
-    }, 350);
-    return () => window.clearTimeout(timer);
-  }, [recentSongs, favoriteSongs, enrichedQueue]);
 
   useEffect(() => {
     if (!currentSong) return;
@@ -899,7 +730,6 @@ export default function App() {
     }
     if (nextVersion === lastRefreshVersionRef.current) return;
     lastRefreshVersionRef.current = nextVersion;
-    apiClient.invalidateLibraryCache();
     void queryClient.invalidateQueries({ queryKey: ["home"] });
     void queryClient.invalidateQueries({ queryKey: ["songs"] });
     void queryClient.invalidateQueries({ queryKey: ["albums"] });
@@ -911,35 +741,8 @@ export default function App() {
   }, [refreshStatus?.currentVersion, selectedAlbumId]);
 
   const orchestraLine =
-    currentSong?.title.toLowerCase().includes("a life full of love theme") ? "Curated from your Tamil vault" : currentSong?.composer || "Tamil soundtrack";
+    currentSong?.title.toLowerCase().includes("a life full of love theme") ? "The Chennai Strings Orchestra" : currentSong?.composer || "Studio Orchestra";
   const heroAlbumLabel = currentSong?.albumTitle ?? "Selected album";
-  const currentAlbumArtwork = useMemo(
-    () => albumItems.find((album) => album.albumId === currentSong?.albumId) ?? null,
-    [albumItems, currentSong?.albumId],
-  );
-  const currentHeroArtwork = "";
-  const selectedAlbumFallback = useMemo<AlbumDetail | null>(() => {
-    if (!selectedAlbumId) return null;
-    const album = albumLookup.get(selectedAlbumId);
-    const albumSongs = fullLibrary.filter((song) => song.albumId === selectedAlbumId);
-    if (!album && !albumSongs.length) return null;
-    const firstSong = albumSongs[0] ?? null;
-    return {
-      albumId: selectedAlbumId,
-      albumUrl: album?.albumUrl ?? selectedAlbumId,
-      name: album?.name ?? firstSong?.albumTitle ?? "Unknown album",
-      year: album?.year ?? firstSong?.year ?? null,
-      musicDirector: album?.musicDirector ?? firstSong?.composer ?? null,
-      singersSummary: album?.singersSummary ?? firstSong?.artist ?? null,
-      imageUrl: album?.imageUrl ?? firstSong?.imageUrl ?? firstSong?.artworkUrl ?? null,
-      coverUrl: album?.coverUrl ?? firstSong?.coverUrl ?? firstSong?.artworkUrl ?? null,
-      language: album?.language ?? "Tamil",
-      trackCount: album?.trackCount ?? albumSongs.length,
-      updatedAt: album?.updatedAt ?? firstSong?.updatedAt,
-      songs: albumSongs,
-    };
-  }, [selectedAlbumId, albumLookup, fullLibrary]);
-  const selectedAlbumForView = selectedAlbum ?? selectedAlbumFallback;
 
   const filteredSongs = useMemo(() => {
     const base =
@@ -974,94 +777,6 @@ export default function App() {
     [playlistSummaries, debouncedQuery]
   );
 
-  const desktopSidebar = useMemo(
-    () => (
-      <Sidebar
-        navItems={navItems}
-        activeNav={activeNav}
-        favoriteCount={favoriteSongs.length}
-        playlists={playlistSummaries}
-        selectedPlaylistId={selectedPlaylistId}
-        onNavChange={(nav) => {
-          startTransition(() => {
-            if (nav === "home") {
-              resetHomeView();
-              return;
-            }
-            setExpandedSection(null);
-            setSelectedArtistName(null);
-            if (nav !== "artists") setSelectedComposerSlug(null);
-            setActiveNav(nav);
-            if (nav !== "playlists") setSelectedPlaylistId(null);
-            setMobileSidebarOpen(false);
-          });
-        }}
-        onFavoritesClick={() => {
-          setSelectedPlaylistId(null);
-          setActiveNav("favorites");
-          setExpandedSection("favorites");
-        }}
-        onPlaylistClick={(playlistId) => {
-          handleOpenPlaylistView(playlistId);
-          setExpandedSection(null);
-        }}
-        onCreatePlaylist={() => setPlaylistModalOpen(true)}
-      />
-    ),
-    [activeNav, favoriteSongs.length, playlistSummaries, selectedPlaylistId],
-  );
-
-  const desktopSearchBar = useMemo(
-    () => (
-      <SearchFilterBar
-        inputRef={searchInputRef}
-        query={searchQuery}
-        selectedFilter={selectedFilter}
-        viewMode={viewMode}
-        filterOpen={filterOpen}
-        refreshState={refreshStatus}
-        refreshPending={manualRefreshCheck.isPending}
-        onQueryChange={(value) => {
-          setSearchQuery(value);
-          if (value.trim()) setActiveNav("search");
-          else if (activeNav === "search") setActiveNav("home");
-        }}
-        onToggleFilter={() => setFilterOpen((open) => !open)}
-        onSelectFilter={handleFilterSelect}
-        onSetViewMode={setViewMode}
-        onRefreshCheck={() => manualRefreshCheck.mutate()}
-      />
-    ),
-    [searchQuery, selectedFilter, viewMode, filterOpen, refreshStatus, manualRefreshCheck.isPending, activeNav],
-  );
-
-  const desktopQueuePanel = useMemo(
-    () => (
-      <QueuePanel
-        queue={enrichedQueue}
-        fallbackArt={fallbackArt}
-        currentSongId={currentSong?.id}
-        onPlay={(song) => handleSongSelect(song, enrichedQueue)}
-        onReorder={moveQueueItem}
-        onClear={handleClearQueue}
-      />
-    ),
-    [enrichedQueue, currentSong?.id],
-  );
-
-  const desktopPlaylistModal = useMemo(
-    () => (
-      <PlaylistModal
-        open={playlistModalOpen}
-        value={newPlaylistName}
-        onChange={setNewPlaylistName}
-        onClose={() => setPlaylistModalOpen(false)}
-        onCreate={handleCreatePlaylist}
-      />
-    ),
-    [playlistModalOpen, newPlaylistName],
-  );
-
   function handleSongSelect(song: Song, sourceQueue?: Song[]) {
     const scopedQueue = sourceQueue?.length ? sourceQueue : queueFromAlbum(song.albumId, fullLibrary);
     playTrack(song, { autoPlay: true, addToRecent: true, sourceQueue: scopedQueue.length ? scopedQueue : [song] });
@@ -1084,28 +799,6 @@ export default function App() {
     }
     lastVolumeRef.current = volume;
     setIsMuted(true);
-  }
-
-  function seekTo(value: number) {
-    const safeDurationValue = duration || currentSong?.durationSeconds || 0;
-    const nextTime = Math.max(0, safeDurationValue ? Math.min(value, safeDurationValue) : value);
-    setCurrentTime(nextTime);
-    const activeDeck = getActiveDeck();
-    if (activeDeck) activeDeck.currentTime = nextTime;
-  }
-
-  function seekBy(seconds: number) {
-    seekTo(currentTime + seconds);
-  }
-
-  function seekToPercent(percent: number) {
-    const safeDurationValue = duration || currentSong?.durationSeconds || 0;
-    if (!safeDurationValue) return;
-    seekTo(safeDurationValue * percent);
-  }
-
-  function setVolumeByDelta(delta: number) {
-    handleVolumeChange(Math.max(0, Math.min(1, volume + delta)));
   }
 
   function handleVolumeChange(nextVolume: number) {
@@ -1306,110 +999,7 @@ export default function App() {
     setMobileAddToPlaylistOpen(true);
   }
 
-  function focusSearchInput() {
-    setActiveNav("search");
-    setMobileTab("search");
-    setMobileSearchOpen(true);
-    window.requestAnimationFrame(() => {
-      searchInputRef.current?.focus();
-    });
-  }
-
-  function navigateDesktop(nav: NavKey) {
-    if (nav === "home") {
-      resetHomeView();
-      return;
-    }
-    setExpandedSection(null);
-    setSelectedAlbumId(null);
-    setSelectedPlaylistId(null);
-    setSelectedArtistName(null);
-    if (nav !== "artists") setSelectedComposerSlug(null);
-    setSelectedFilter("all");
-    setActiveNav(nav);
-    setMobileTab(nav === "search" ? "search" : "library");
-    if (nav === "search") setMobileSearchOpen(true);
-    if (nav === "library") setMobileLibrarySection("favorites");
-    if (nav === "playlists") setMobileLibrarySection("playlists");
-    if (nav === "artists") setMobileLibrarySection("artists");
-  }
-
-  function closeTransientUi() {
-    if (shortcutModalOpen) {
-      setShortcutModalOpen(false);
-      return;
-    }
-    setHeroMenuOpen(false);
-    setFilterOpen(false);
-    setPlaylistModalOpen(false);
-    setMobileFullPlayerOpen(false);
-    setMobileQueueOpen(false);
-    setMobileAddToPlaylistOpen(false);
-    setMobileCreatePlaylistOpen(false);
-    setMobileRefreshOpen(false);
-    setMobileSearchOpen(false);
-    setMobileSidebarOpen(false);
-  }
-
-  function openAddCurrentToPlaylistPicker() {
-    if (!currentSong) return;
-    setPlaylistTargetTrack(currentSong);
-    if (isMobileViewport) {
-      setMobileAddToPlaylistOpen(true);
-      return;
-    }
-    setHeroMenuOpen(true);
-    setHeroFeedback("Choose a playlist from the More menu");
-  }
-
-  function openCreatePlaylistFromShortcut() {
-    setPlaylistTargetTrack(currentSong ?? null);
-    if (isMobileViewport) {
-      setMobileCreatePlaylistOpen(true);
-      return;
-    }
-    setPlaylistModalOpen(true);
-  }
-
-  function addCurrentSongToQueue() {
-    if (!currentSong) return;
-    addToQueue(currentSong);
-    setHeroFeedback("Added to queue");
-  }
-
-  useKeyboardShortcuts({
-    enabled: true,
-    isShortcutModalOpen: shortcutModalOpen,
-    openShortcuts: () => setShortcutModalOpen(true),
-    closeModals: closeTransientUi,
-    togglePlayPause: handlePlayPauseToggle,
-    playNext: handleNextTrack,
-    playPrevious: handlePreviousTrack,
-    seekBy,
-    seekToPercent,
-    setVolumeByDelta,
-    toggleMute: handleToggleMute,
-    toggleShuffle,
-    cycleRepeat: cycleRepeatMode,
-    toggleFavoriteCurrent: () => currentSong && toggleFavorite.mutate(currentSong.id),
-    focusSearch: focusSearchInput,
-    navigateHome: resetHomeView,
-    navigateSearch: focusSearchInput,
-    navigateLibrary: () => navigateDesktop("library"),
-    navigatePlaylists: () => navigateDesktop("playlists"),
-    navigateArtists: () => navigateDesktop("artists"),
-    toggleQueue: () => {
-      if (isMobileViewport) setMobileQueueOpen((open) => !open);
-      else setDesktopQueueOpen((open) => !open);
-    },
-    openAddToPlaylist: openAddCurrentToPlaylistPicker,
-    openCreatePlaylist: openCreatePlaylistFromShortcut,
-    addCurrentToQueue: addCurrentSongToQueue,
-    toggleFullPlayer: () => setMobileFullPlayerOpen((open) => !open),
-    openMoreOptions: () => setHeroMenuOpen((open) => !open),
-  });
-
-  const centerResults = useMemo(() => {
+  function renderCenterResults() {
     if (expandedSection === "favorites") {
       return (
         <section className="content-section">
@@ -1423,7 +1013,7 @@ export default function App() {
             {filteredFavoriteSongs.map((song) => (
               <button key={song.id} className={viewMode === "grid" ? "recent-card" : "recent-row"} onClick={() => handleSongSelect(song, favoriteSongs)}>
                 <div className="recent-card__media">
-                  <AbstractCover seed={song.id || song.title} size="md" active={song.id === currentSong?.id} />
+                  <img src={song.artworkUrl || fallbackArt} alt={song.title} loading="lazy" decoding="async" />
                 </div>
                 <div className="recent-card__copy">
                   <strong>{song.title}</strong>
@@ -1447,13 +1037,9 @@ export default function App() {
           </div>
           <div className={viewMode === "grid" ? "recent-grid" : "recent-list"}>
             {filteredRecentSongs.map((song) => (
-              <button
-                key={song.id}
-                className={viewMode === "grid" ? "recent-card" : "recent-row"}
-                onClick={() => handleSongSelect(song, queueFromAlbum(song.albumId, fullLibrary))}
-              >
+              <button key={song.id} className={viewMode === "grid" ? "recent-card" : "recent-row"} onClick={() => handleSongSelect(song, fullLibrary)}>
                 <div className="recent-card__media">
-                  <AbstractCover seed={song.id || song.title} size="md" active={song.id === currentSong?.id} />
+                  <img src={song.artworkUrl || fallbackArt} alt={song.title} loading="lazy" decoding="async" />
                 </div>
                 <div className="recent-card__copy">
                   <strong>{song.title}</strong>
@@ -1467,84 +1053,48 @@ export default function App() {
     }
 
     if (activeNav === "home" && selectedFilter === "all" && !searchQuery.trim()) {
-      const forYouCards = [
-        { title: "Nature Acoustic", subtitle: "Organic calm", song: fullLibrary[0] ?? currentSong, variant: "wave" as const },
-        { title: "Early Morning Calm", subtitle: "Soft starts", song: fullLibrary[1] ?? currentSong, variant: "rings" as const },
-        { title: "Deep Focus", subtitle: "Quiet flow", song: fullLibrary[2] ?? currentSong, variant: "dots" as const },
-        { title: "Peaceful Piano", subtitle: "Warm keys", song: fullLibrary[3] ?? currentSong, variant: "bars" as const },
-        { title: "Rainy Day Vibes", subtitle: "Gentle mood", song: fullLibrary[4] ?? currentSong, variant: "lines" as const },
-      ].filter((item): item is { title: string; subtitle: string; song: Song; variant: "wave" | "rings" | "dots" | "bars" | "lines" } => Boolean(item.song));
-      const playlistRows = uniqueById([currentSong, ...filteredRecentSongs, ...favoriteSongs, ...fullLibrary].filter(Boolean) as Song[]).slice(0, 8);
       return (
         <>
-          <section className="for-you-section">
-            <div className="section-header">
-              <h2>For You</h2>
-              <button className="section-link" type="button" onClick={() => navigateDesktop("library")}>View all</button>
-            </div>
-            <div className="for-you-grid">
-              {forYouCards.map((card) => (
-                <button key={card.title} className="for-you-card" type="button" onClick={() => handleSongSelect(card.song, fullLibrary)}>
-                  <AbstractCover seed={card.song.id || card.title} variant={card.variant} size="lg" />
-                  <span>
-                    <strong>{card.title}</strong>
-                    <small>{card.subtitle}</small>
-                  </span>
-                  <span className="for-you-card__play">▶</span>
-                </button>
-              ))}
-            </div>
-          </section>
-          <section className="content-section playlist-section">
-            <div className="section-header">
-              <h2>Your Playlist</h2>
-              <button className="section-link section-link--pill" type="button" onClick={() => setPlaylistModalOpen(true)}>
-                <Plus size={17} /> Add
-              </button>
-            </div>
-            <div className="playlist-table">
-              <div className="playlist-table__head">
-                <span>#</span>
-                <span />
-                <span>Title</span>
-                <span>Artist</span>
-                <span>Album</span>
-                <span />
-                <span><Clock3 size={15} /></span>
-                <span />
-              </div>
-              {playlistRows.map((song, index) => (
-                <div key={song.id} className={song.id === currentSong?.id ? "playlist-row is-active" : "playlist-row"}>
-                  <span>{index + 1}</span>
-                  <AbstractCover seed={song.id || song.title} size="xs" active={song.id === currentSong?.id} />
-                  <button type="button" onClick={() => handleSongSelect(song, playlistRows)}>{song.title}</button>
-                  <span>{song.artist}</span>
-                  <span>{song.albumTitle}</span>
-                  <button className={song.favorite ? "track-row__favorite is-active" : "track-row__favorite"} onClick={() => toggleFavorite.mutate(song.id)}>
-                    <Heart size={17} fill={song.favorite ? "currentColor" : "none"} />
-                  </button>
-                  <span>{safeDuration(song) ? `${Math.floor(safeDuration(song) / 60)}:${String(safeDuration(song) % 60).padStart(2, "0")}` : "—:—"}</span>
-                  <button className="track-row__more" type="button" onClick={() => handleOpenAddToPlaylistForTrack(song)}>
-                    <MoreHorizontal size={18} />
-                  </button>
-                </div>
-              ))}
-            </div>
-          </section>
+          <RecentlyPlayed
+            title="Favorites"
+            tracks={filteredFavoriteSongs}
+            viewMode={viewMode}
+            layout="row"
+            fallbackArt={fallbackArt}
+            currentTrackId={currentSong?.id}
+            emptyHint="Tap the heart on any song to save it here."
+            onPlayTrack={(song) => handleSongSelect(song, favoriteSongs)}
+            onPrefetchTrack={(song) => requestSongPrefetch([song.id])}
+            onViewAll={() => {
+              setActiveNav("favorites");
+              setExpandedSection("favorites");
+            }}
+          />
+          <RecentlyPlayed
+            title="Recently played"
+            tracks={filteredRecentSongs}
+            viewMode={viewMode}
+            layout="row"
+            fallbackArt={fallbackArt}
+            currentTrackId={currentSong?.id}
+            onPlayTrack={(song) => handleSongSelect(song, fullLibrary)}
+            onPrefetchTrack={(song) => requestSongPrefetch([song.id])}
+            onViewAll={() => setExpandedSection("recent")}
+          />
         </>
       );
     }
 
     if (activeNav === "albums" || selectedFilter === "albums") {
-      if (selectedAlbumId && selectedAlbumForView) {
+      if (selectedAlbumId && selectedAlbum) {
         return (
           <section className="content-section">
             <div className="section-header section-header--album-detail">
               <div>
                 <span className="section-detail-label">ALBUM</span>
-                <h2>{selectedAlbumForView.name}</h2>
+                <h2>{selectedAlbum.name}</h2>
                 <span className="section-count">
-                  {selectedAlbumForView.musicDirector || selectedAlbumForView.singersSummary || "Tamil soundtrack"}
+                  {selectedAlbum.musicDirector || selectedAlbum.singersSummary || "Tamil soundtrack"}
                 </span>
               </div>
               <button className="section-link" onClick={() => setSelectedAlbumId(null)}>
@@ -1552,10 +1102,10 @@ export default function App() {
               </button>
             </div>
             <div className="track-table">
-              {selectedAlbumForView.songs.map((song) => (
+              {selectedAlbum.songs.map((song) => (
                 <div key={song.id} className="track-row">
-                  <button className="track-row__main" onMouseEnter={() => requestSongPrefetch([song.id])} onClick={() => handleSongSelect(song, selectedAlbumForView.songs)}>
-                    <AbstractCover seed={song.id || song.title} size="xs" active={song.id === currentSong?.id} />
+                  <button className="track-row__main" onMouseEnter={() => requestSongPrefetch([song.id])} onClick={() => handleSongSelect(song, selectedAlbum.songs)}>
+                    <img src={imageFor(song)} alt={song.title} loading="lazy" decoding="async" />
                     <div>
                       <strong>{song.title}</strong>
                       <span>{song.artist}</span>
@@ -1588,7 +1138,7 @@ export default function App() {
                   handleOpenAlbumView(album.albumId);
                 }}
               >
-                <AbstractCover seed={album.albumId || album.name} size="md" />
+                <img src={album.imageUrl || fallbackArt} alt={album.name} loading="lazy" decoding="async" />
                 <div>
                   <strong>{album.name}</strong>
                   <span>{album.musicDirector || album.singersSummary || "Tamil soundtrack"}</span>
@@ -1623,7 +1173,7 @@ export default function App() {
                     onMouseEnter={() => requestSongPrefetch([song.id])}
                     onClick={() => handleSongSelect(song, composerSongs)}
                   >
-                    <AbstractCover seed={song.id || song.title} size="xs" active={song.id === currentSong?.id} />
+                    <img src={imageFor(song)} alt={song.title} loading="lazy" decoding="async" />
                     <div>
                       <strong>{song.title}</strong>
                       <span>{song.artist}</span>
@@ -1663,7 +1213,11 @@ export default function App() {
                   onClick={() => setSelectedComposerSlug(composer.slug)}
                 >
                   <div className="composer-card__media">
-                    <AbstractCover seed={composer.slug || composer.name} size="sm" variant="rings" />
+                    {composer.coverUrl ? (
+                      <img src={composer.coverUrl} alt={composer.name} />
+                    ) : (
+                      <span className="composer-card__monogram">{composer.name.charAt(0)}</span>
+                    )}
                   </div>
                   <div className="composer-card__copy">
                     <strong title={composer.name}>{composer.name}</strong>
@@ -1684,19 +1238,6 @@ export default function App() {
         <section className="content-section">
           <div className="section-header">
             <h2>{selectedPlaylist ? selectedPlaylist.name : "Playlists"}</h2>
-            {selectedPlaylist ? (
-              <div className="section-header__actions">
-                <button className="section-link" type="button" onClick={() => handleRenamePlaylist(selectedPlaylist.id)}>
-                  Rename
-                </button>
-                <button className="section-link section-link--danger" type="button" onClick={() => handleDeletePlaylist(selectedPlaylist.id)}>
-                  Delete
-                </button>
-                <button className="section-link" type="button" onClick={() => setSelectedPlaylistId(null)}>
-                  All playlists
-                </button>
-              </div>
-            ) : null}
           </div>
           {selectedPlaylist ? (
             selectedPlaylistSongs.length ? (
@@ -1704,7 +1245,7 @@ export default function App() {
                 {selectedPlaylistSongs.map((song) => (
                   <div key={song.id} className="track-row">
                     <button className="track-row__main" onMouseEnter={() => requestSongPrefetch([song.id])} onClick={() => handleSongSelect(song, selectedPlaylistSongs)}>
-                      <AbstractCover seed={song.id || song.title} size="xs" active={song.id === currentSong?.id} />
+                      <img src={imageFor(song)} alt={song.title} loading="lazy" decoding="async" />
                       <div>
                         <strong>{song.title}</strong>
                         <span>{song.artist}</span>
@@ -1724,20 +1265,14 @@ export default function App() {
           ) : (
             <div className="playlist-grid">
               {filteredPlaylists.map((playlist) => (
-                <div
+                <button
                   key={playlist.id}
                   className="playlist-card"
+                  onClick={() => handleOpenPlaylistView(playlist.id)}
                 >
-                  <button type="button" className="playlist-card__main" onClick={() => handleOpenPlaylistView(playlist.id)}>
-                    <AbstractCover seed={playlist.id || playlist.name} size="sm" variant="leaf" />
-                    <strong>{playlist.name}</strong>
-                    <span>{playlist.count} songs</span>
-                  </button>
-                  <div className="playlist-card__actions">
-                    <button type="button" onClick={() => handleRenamePlaylist(playlist.id)}>Rename</button>
-                    <button type="button" onClick={() => handleDeletePlaylist(playlist.id)}>Delete</button>
-                  </div>
-                </div>
+                  <strong>{playlist.name}</strong>
+                  <span>{playlist.count} songs</span>
+                </button>
               ))}
             </div>
           )}
@@ -1755,7 +1290,7 @@ export default function App() {
           {filteredSongs.slice(0, 24).map((song) => (
             <div key={song.id} className="track-row">
               <button className="track-row__main" onMouseEnter={() => requestSongPrefetch([song.id])} onClick={() => handleSongSelect(song, filteredSongs)}>
-                <AbstractCover seed={song.id || song.title} size="xs" active={song.id === currentSong?.id} />
+                <img src={imageFor(song)} alt={song.title} loading="lazy" decoding="async" />
                 <div>
                   <strong>{song.title}</strong>
                   <span>{song.artist}</span>
@@ -1771,34 +1306,7 @@ export default function App() {
         </div>
       </section>
     );
-  }, [
-    expandedSection,
-    viewMode,
-    filteredFavoriteSongs,
-    filteredRecentSongs,
-    activeNav,
-    selectedFilter,
-    searchQuery,
-    favoriteSongs,
-    currentSong?.id,
-    selectedAlbumId,
-    selectedAlbum,
-    selectedAlbumForView,
-    filteredAlbums,
-    selectedComposerSlug,
-    composerDetail,
-    composersData?.items,
-    debouncedQuery,
-    selectedPlaylist,
-    selectedPlaylistSongs,
-    filteredPlaylists,
-    filteredSongs,
-    playlistSummaries,
-    fullLibrary,
-    albumItems,
-    homePlaylistCards,
-    homeComposerCards,
-  ]);
+  }
 
   return (
     <>
@@ -1875,7 +1383,7 @@ export default function App() {
             if (failedSongId && retries < 3 && currentSong && currentSong.id === failedSongId) {
               playbackRetryRef.current.set(failedSongId, retries + 1);
               const bust = `${songStreamUrl(currentSong)}${songStreamUrl(currentSong).includes("?") ? "&" : "?"}retry=${Date.now()}`;
-              const backoffMs = retries === 0 ? 200 : retries === 1 ? 800 : 1600;
+              const backoffMs = retries === 0 ? 250 : retries === 1 ? 1500 : 4000;
               debugPlayback("retry", failedSongId, retries + 1, `backoff=${backoffMs}ms`);
               setBuffering(true);
               window.setTimeout(() => {
@@ -1918,7 +1426,7 @@ export default function App() {
             isShuffleOn={shuffle}
             repeatMode={repeatMode}
             buffering={buffering}
-                queue={enrichedQueue}
+            queue={queue}
             favorites={favoriteSongs}
             recentlyPlayed={recentSongs}
             fullLibrary={fullLibrary}
@@ -2005,11 +1513,41 @@ export default function App() {
         </div>
       ) : (
         <div className="desktop-only">
-          <div className={desktopQueueOpen ? "app-shell" : "app-shell is-queue-hidden"}>
+          <div className="app-shell">
             {mobileSidebarOpen ? <button className="app-backdrop" onClick={() => setMobileSidebarOpen(false)} aria-label="Close sidebar" /> : null}
 
             <div className={mobileSidebarOpen ? "app-sidebar-wrap is-open" : "app-sidebar-wrap"}>
-              {desktopSidebar}
+              <Sidebar
+                navItems={navItems}
+                activeNav={activeNav}
+                favoriteCount={favoriteSongs.length}
+                playlists={playlistSummaries}
+                selectedPlaylistId={selectedPlaylistId}
+                onNavChange={(nav) => {
+                  startTransition(() => {
+                    if (nav === "home") {
+                      resetHomeView();
+                      return;
+                    }
+                    setExpandedSection(null);
+                    setSelectedArtistName(null);
+                    if (nav !== "artists") setSelectedComposerSlug(null);
+                    setActiveNav(nav);
+                    if (nav !== "playlists") setSelectedPlaylistId(null);
+                    setMobileSidebarOpen(false);
+                  });
+                }}
+                onFavoritesClick={() => {
+                  setSelectedPlaylistId(null);
+                  setActiveNav("favorites");
+                  setExpandedSection("favorites");
+                }}
+                onPlaylistClick={(playlistId) => {
+                  handleOpenPlaylistView(playlistId);
+                  setExpandedSection(null);
+                }}
+                onCreatePlaylist={() => setPlaylistModalOpen(true)}
+              />
             </div>
 
             <main className="main-content">
@@ -2018,27 +1556,15 @@ export default function App() {
                   <Menu size={18} />
                 </button>
                 <div className="mobile-header__brand">
-                  <AbstractCover seed={APP_NAME} size="xs" variant="leaf" />
+                  <img src="/Icon.png" alt={APP_NAME} />
                   <strong>{APP_NAME}</strong>
-                </div>
-              </div>
-
-              <div className="top-bar">
-                {desktopSearchBar}
-                <div className="top-bar__actions">
-                  <button className="top-bar__icon" type="button" aria-label="Notifications">
-                    <Bell size={20} />
-                  </button>
-                  <button className="top-bar__profile" type="button" aria-label="Profile">
-                    V
-                  </button>
                 </div>
               </div>
 
               <NowPlayingHero
                 song={currentSong}
-                artwork={currentHeroArtwork}
-                background={currentHeroArtwork}
+                artwork={imageFor(currentSong)}
+                background={imageFor(currentSong)}
                 orchestraLine={orchestraLine}
                 albumLabel={heroAlbumLabel}
                 isPlaying={playing}
@@ -2073,49 +1599,52 @@ export default function App() {
                   setHeroMenuOpen(false);
                 }}
                 onViewAlbum={handleOpenCurrentAlbum}
-                onOpenShortcuts={() => {
-                  setShortcutModalOpen(true);
-                  setHeroMenuOpen(false);
-                }}
                 onShare={handleShareCurrentSong}
               />
 
-              {centerResults}
+              <SearchFilterBar
+                query={searchQuery}
+                selectedFilter={selectedFilter}
+                viewMode={viewMode}
+                filterOpen={filterOpen}
+                refreshState={refreshStatus}
+                refreshPending={manualRefreshCheck.isPending}
+                onQueryChange={(value) => {
+                  // Update the visible input synchronously so typing is
+                  // instant; heavy work (filtering, /api/search) is throttled
+                  // separately by `debouncedQuery`.
+                  setSearchQuery(value);
+                  if (value.trim()) setActiveNav("search");
+                  else if (activeNav === "search") setActiveNav("home");
+                }}
+                onToggleFilter={() => setFilterOpen((open) => !open)}
+                onSelectFilter={handleFilterSelect}
+                onSetViewMode={setViewMode}
+                onRefreshCheck={() => manualRefreshCheck.mutate()}
+              />
+
+              {renderCenterResults()}
             </main>
 
-            {desktopQueueOpen ? desktopQueuePanel : null}
-
-            <BottomPlayer
-              song={currentSong}
-              isPlaying={playing}
-              isShuffleOn={shuffle}
-              repeatMode={repeatMode}
-              isMuted={isMuted}
-              volume={volume}
-              currentTime={currentTime}
-              duration={duration || currentSong?.durationSeconds || 0}
-              onPlayPause={handlePlayPauseToggle}
-              onPrevious={handlePreviousTrack}
-              onNext={handleNextTrack}
-              onToggleShuffle={toggleShuffle}
-              onCycleRepeat={cycleRepeatMode}
-              onToggleFavorite={() => currentSong && toggleFavorite.mutate(currentSong.id)}
-              onToggleMute={handleToggleMute}
-              onVolumeChange={handleVolumeChange}
-              onSeek={(value) => {
-                setCurrentTime(value);
-                const activeDeck = getActiveDeck();
-                if (activeDeck) activeDeck.currentTime = value;
-              }}
-              onToggleQueue={() => setDesktopQueueOpen((open) => !open)}
-              onOpenMenu={() => setHeroMenuOpen((open) => !open)}
+            <QueuePanel
+              queue={queue}
+              fallbackArt={fallbackArt}
+              currentSongId={currentSong?.id}
+              onPlay={(song) => handleSongSelect(song, queue)}
+              onReorder={moveQueueItem}
+              onClear={handleClearQueue}
             />
 
-            {desktopPlaylistModal}
+            <PlaylistModal
+              open={playlistModalOpen}
+              value={newPlaylistName}
+              onChange={setNewPlaylistName}
+              onClose={() => setPlaylistModalOpen(false)}
+              onCreate={handleCreatePlaylist}
+            />
           </div>
         </div>
       )}
-      <KeyboardShortcutsModal open={shortcutModalOpen} onClose={() => setShortcutModalOpen(false)} />
     </>
   );
 }

@@ -1,7 +1,6 @@
-import { GripVertical, Play } from "lucide-react";
+import { GripVertical } from "lucide-react";
 import { useState } from "react";
 import type { Song } from "../types";
-import AbstractCover from "./AbstractCover";
 
 type QueuePanelProps = {
   queue: Song[];
@@ -13,7 +12,7 @@ type QueuePanelProps = {
 };
 
 function formatTime(seconds?: number | null) {
-  if (!seconds || seconds <= 0) return "—:—";
+  if (!seconds || seconds <= 0) return "";
   const value = seconds;
   const mins = Math.floor(value / 60);
   const secs = Math.floor(value % 60);
@@ -42,6 +41,7 @@ export default function QueuePanel({ queue, fallbackArt, currentSongId, onPlay, 
     <aside className="queue-panel">
       <div className="queue-panel__header">
         <div>
+          <span className="queue-panel__eyebrow">UP NEXT</span>
           <h2>Queue</h2>
         </div>
         <button className="queue-panel__clear" onClick={onClear}>
@@ -74,18 +74,13 @@ export default function QueuePanel({ queue, fallbackArt, currentSongId, onPlay, 
               }}
             >
               <button className="queue-item__main" onClick={() => onPlay(song)}>
-                {song.id === currentSongId ? (
-                  <span className="queue-item__playing">
-                    <Play size={10} fill="currentColor" />
-                  </span>
-                ) : null}
-                <AbstractCover seed={song.id || song.title} size="xs" active={song.id === currentSongId} />
+                <img src={song.artworkUrl || fallbackArt} alt={song.title} loading="lazy" decoding="async" />
                 <div className="queue-item__copy">
                   <strong title={song.title}>{song.title}</strong>
                   <span title={song.artist}>{song.artist}</span>
                 </div>
               </button>
-              <span className={song.durationSeconds && song.durationSeconds > 0 ? "queue-item__duration" : "queue-item__duration is-empty"}>
+              <span className={formatTime(song.durationSeconds) ? "queue-item__duration" : "queue-item__duration is-empty"}>
                 {formatTime(song.durationSeconds)}
               </span>
               <button
