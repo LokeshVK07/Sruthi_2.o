@@ -40,8 +40,17 @@ export const usePlayerStore = create<PlayerState>((set, get) => ({
       playing: autoplay && songs.length > 0
     }),
   playSong: (song, queue) => {
-    const currentQueue = queue ?? get().queue;
-    const nextQueue = currentQueue.length ? currentQueue : [song];
+    const state = get();
+    const currentQueue = queue ?? state.queue;
+    const nextQueue = currentQueue.length
+      ? currentQueue
+      : state.queue.length
+        ? [
+            ...state.queue.slice(0, state.currentIndex + 1),
+            song,
+            ...state.queue.slice(state.currentIndex + 1).filter((item) => item.id !== song.id),
+          ]
+        : [song];
     const index = nextQueue.findIndex((item) => item.id === song.id);
     set({
       queue: nextQueue,
@@ -132,9 +141,18 @@ export const usePlayerStore = create<PlayerState>((set, get) => ({
       return { queue: nextQueue, currentIndex: nextIndex };
     }),
   addToQueue: (song) =>
-    set((state) => ({
-      queue: [...state.queue, song]
-    })),
+    set((state) => {
+      const queue = state.queue.length ? [...state.queue] : [song];
+      const existingIndex = queue.findIndex((item) => item.id === song.id);
+      if (!state.queue.length) {
+        return { queue, currentIndex: 0 };
+      }
+      if (existingIndex >= 0) {
+        queue.splice(existingIndex, 1);
+      }
+      queue.splice(state.currentIndex + 1, 0, song);
+      return { queue };
+    }),
   toggleShuffle: () => set((state) => ({ shuffle: !state.shuffle })),
   cycleRepeatMode: () =>
     set((state) => ({

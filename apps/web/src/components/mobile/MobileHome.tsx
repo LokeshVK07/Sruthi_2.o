@@ -1,6 +1,7 @@
 import { ChevronRight, Heart, ListMusic, Play, Plus, RefreshCw, Search, Settings2 } from "lucide-react";
 import AppLogo from "../AppLogo";
 import type { RefreshStatus, Song } from "../../types";
+import AbstractCover from "../AbstractCover";
 
 type PlaylistSummary = { id: string; name: string; count: number };
 
@@ -67,7 +68,7 @@ export default function MobileHome({
           <AppLogo size={40} />
           <div className="mobile-brand__copy">
             <strong>{appName}</strong>
-            <span>Premium music player</span>
+            <span>Tamil and Telugu media player</span>
           </div>
         </div>
         <div className="mobile-screen__header-actions">
@@ -157,7 +158,7 @@ export default function MobileHome({
                 onClick={() => onPlayTrack(track)}
                 onMouseEnter={() => onPrefetchTrack?.(track)}
               >
-                <img src={track.artworkUrl || ""} alt={track.title} />
+                <AbstractCover seed={track.id || track.title} size="sm" className="mobile-artwork" />
                 <div className="mobile-song-row__copy">
                   <strong title={track.title}>{track.title}</strong>
                   <span title={track.artist}>{track.artist}</span>
