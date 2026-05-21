@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 import uuid
 from pathlib import Path
@@ -75,6 +76,27 @@ def main() -> int:
             problems.append(f"assets.directory is empty: {assets_dir}")
         elif not (assets_dir / "index.html").is_file():
             problems.append(f"assets.directory is missing index.html: {assets_dir}")
+        else:
+            index_html = assets_dir / "index.html"
+            try:
+                html = index_html.read_text(encoding="utf-8")
+            except OSError as exc:
+                problems.append(f"could not read assets index.html: {exc}")
+            else:
+                # Wrangler only checks that the asset directory exists. This
+                # catches stale/partial frontend builds where index.html points
+                # at hashed Vite files that were not uploaded with the Worker.
+                refs = re.findall(r"""(?:src|href)=["']/?(assets/[^"']+)["']""", html)
+                missing_refs = [ref for ref in refs if not (assets_dir / ref).is_file()]
+                if missing_refs:
+                    problems.append("index.html references missing asset files: " + ", ".join(missing_refs))
+                if (assets_dir / "assets").is_dir():
+                    vite_js = list((assets_dir / "assets").glob("index-*.js"))
+                    vite_css = list((assets_dir / "assets").glob("index-*.css"))
+                    if not vite_js:
+                        problems.append(f"Vite JS bundle is missing under {assets_dir / 'assets'}")
+                    if not vite_css:
+                        problems.append(f"Vite CSS bundle is missing under {assets_dir / 'assets'}")
 
     bindings = config.get("d1_databases") or []
     if not bindings:

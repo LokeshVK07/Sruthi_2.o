@@ -9,7 +9,7 @@ on:
         default: false
         type: boolean
   schedule:
-    - cron: "17 */6 * * *"
+    - cron: "17 */12 * * *"
 
 permissions:
   contents: read
@@ -27,7 +27,7 @@ jobs:
   refresh-and-deploy:
     name: Refresh and Deploy Vibe 2.o
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    timeout-minutes: 360
     env:
       CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
       GH_VARIABLES_TOKEN: ${{ secrets.GH_VARIABLES_TOKEN }}
@@ -50,6 +50,7 @@ jobs:
       WORKER_PUBLIC_URL: ${{ vars.VIBE_WORKER_PUBLIC_URL || vars.SRUTHI_WORKER_URL || vars.WORKER_PUBLIC_URL }}
       SCRAPER_PROJECT_NAME: Vibe 2.o
       REFRESH_DISCOVERY_MODE: ${{ vars.VIBE_REFRESH_MODE || vars.SRUTHI_REFRESH_MODE || 'all' }}
+      VIBE_FORCE_FULL_REFRESH: ${{ vars.VIBE_FORCE_FULL_REFRESH || 'false' }}
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
@@ -116,7 +117,9 @@ jobs:
             D1_DB_A_ID \
             D1_DB_A_NAME \
             D1_DB_B_ID \
-            D1_DB_B_NAME; do
+            D1_DB_B_NAME \
+            WORKER_NAME \
+            WORKER_PUBLIC_URL; do
             if [[ -z "${!key:-}" ]]; then
               missing+=("$key")
             fi
@@ -143,6 +146,10 @@ jobs:
           fi
           if [[ -n "${WORKER_PUBLIC_URL:-}" && ! "${WORKER_PUBLIC_URL}" =~ ^https?:// ]]; then
             echo "::error::VIBE_WORKER_PUBLIC_URL must start with http:// or https:// when configured."
+            exit 1
+          fi
+          if [[ "${VIBE_FORCE_FULL_REFRESH}" != "true" && "${VIBE_FORCE_FULL_REFRESH}" != "false" ]]; then
+            echo "::error::VIBE_FORCE_FULL_REFRESH must be true or false when configured."
             exit 1
           fi
           if [[ "${REFRESH_DISCOVERY_MODE}" != "pagewise" && "${REFRESH_DISCOVERY_MODE}" != "movie-index" && "${REFRESH_DISCOVERY_MODE}" != "all" ]]; then
@@ -185,6 +192,45 @@ jobs:
             fi
           done
 
+          shopt -s nullglob
+          public_js=(cloudflare/public/assets/index-*.js)
+          public_css=(cloudflare/public/assets/index-*.css)
+          if (( ${#public_js[@]} == 0 )); then
+            echo "::error::Required Vite UI bundle is missing: cloudflare/public/assets/index-*.js"
+            exit 1
+          fi
+          if (( ${#public_css[@]} == 0 )); then
+            echo "::error::Required Vite UI stylesheet is missing: cloudflare/public/assets/index-*.css"
+            exit 1
+          fi
+          python - <<'PY'
+          import re
+          import sys
+          from pathlib import Path
+
+          index = Path("cloudflare/public/index.html")
+          html = index.read_text(encoding="utf-8")
+          refs = re.findall(r"""(?:src|href)=["']/?(assets/[^"']+)["']""", html)
+          missing = [ref for ref in refs if not (index.parent / ref).is_file()]
+          if missing:
+              print("::error::cloudflare/public/index.html references missing asset files: " + ", ".join(missing), file=sys.stderr)
+              raise SystemExit(1)
+          if not refs:
+              print("::error::cloudflare/public/index.html does not reference the built /assets bundle.", file=sys.stderr)
+              raise SystemExit(1)
+          print(f"Verified {len(refs)} built frontend asset reference(s).")
+          PY
+          python -m py_compile \
+            tools/masstamilan_refresh.py \
+            tools/validate_catalog.py \
+            cloudflare/scripts/render_wrangler_config.py \
+            cloudflare/scripts/prepare_release.py \
+            cloudflare/scripts/export_d1_sql.py \
+            cloudflare/scripts/validate_generated_data.py \
+            cloudflare/scripts/validate_refresh_health.py \
+            cloudflare/scripts/validate_release.py \
+            cloudflare/scripts/validate_wrangler_config.py
+
           node --check cloudflare/src/worker.js
           python cloudflare/scripts/validate_wrangler_config.py \
             cloudflare/wrangler.jsonc \
@@ -196,10 +242,13 @@ jobs:
         run: |
           set -euo pipefail
           full_refresh="false"
+          if [[ "${GITHUB_EVENT_NAME}" == "schedule" ]]; then
+            full_refresh="true"
+          fi
           if [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" && "${REQUESTED_FULL_REFRESH}" == "true" ]]; then
             full_refresh="true"
           fi
-          if [[ "${SCRAPER_FULL_REFRESH:-false}" == "true" ]]; then
+          if [[ "${VIBE_FORCE_FULL_REFRESH}" == "true" || "${SCRAPER_FULL_REFRESH:-false}" == "true" ]]; then
             full_refresh="true"
           fi
           echo "VIBE_FULL_REFRESH=${full_refresh}" >> "$GITHUB_ENV"
@@ -364,7 +413,7 @@ jobs:
 
           workers="${SCRAPER_WORKERS:-}"
           if [[ -z "$workers" ]]; then
-            workers="$(python -c 'import os; print(max(4, os.cpu_count() or 4))')"
+            workers="4"
           fi
           if ! [[ "$workers" =~ ^[0-9]+$ ]] || (( workers < 1 )); then
             echo "::error::SCRAPER_WORKERS must be a positive integer, got '${workers}'."
@@ -377,10 +426,10 @@ jobs:
           fi
 
           if [[ "${VIBE_FULL_REFRESH}" == "true" ]]; then
-            export SCRAPER_LISTING_DELAY_SECONDS="8"
-            export SCRAPER_DETAIL_DELAY_SECONDS="3"
-            export SCRAPER_JITTER_SECONDS="2"
-            export SCRAPER_MAX_ATTEMPTS="3"
+            export SCRAPER_LISTING_DELAY_SECONDS="${SCRAPER_LISTING_DELAY_SECONDS:-1}"
+            export SCRAPER_DETAIL_DELAY_SECONDS="${SCRAPER_DETAIL_DELAY_SECONDS:-1}"
+            export SCRAPER_JITTER_SECONDS="${SCRAPER_JITTER_SECONDS:-1}"
+            export SCRAPER_MAX_ATTEMPTS="${SCRAPER_MAX_ATTEMPTS:-5}"
             export SCRAPER_RETRY_BASE_DELAY_SECONDS="8"
             export SCRAPER_RETRY_MAX_DELAY_SECONDS="45"
             export SCRAPER_LIMITER_COOLDOWN_SECONDS="60"
@@ -398,8 +447,9 @@ jobs:
               --retry-count "${SCRAPER_MAX_ATTEMPTS}"
               --retry-base-delay "${SCRAPER_RETRY_BASE_DELAY_SECONDS}"
               --retry-max-delay "${SCRAPER_RETRY_MAX_DELAY_SECONDS}"
-              --stop-after-known-pages 2
-              --movie-index-stop-after-known-pages 120
+              --stop-after-known-pages 4
+              --movie-index-stop-after-known-pages 45
+              --include-tag-index
               --max-limiter-streak "${SCRAPER_MAX_LIMITER_STREAK}"
               --abort-on-page1-limited
               --report-path "${REFRESH_REPORT}"
@@ -427,8 +477,9 @@ jobs:
               --retry-count "${SCRAPER_MAX_ATTEMPTS}"
               --retry-base-delay "${SCRAPER_RETRY_BASE_DELAY_SECONDS}"
               --retry-max-delay "${SCRAPER_RETRY_MAX_DELAY_SECONDS}"
-              --stop-after-known-pages 2
-              --movie-index-stop-after-known-pages 120
+              --stop-after-known-pages 4
+              --movie-index-stop-after-known-pages 45
+              --include-tag-index
               --max-limiter-streak "${SCRAPER_MAX_LIMITER_STREAK}"
               --abort-on-page1-limited
               --report-path "${REFRESH_REPORT}"
