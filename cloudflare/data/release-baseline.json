@@ -1,5 +1,5 @@
 {
-  "_comment": "Floors used by cloudflare/scripts/prepare_release.py. The background-refresh workflow refuses to deploy a refresh that produces fewer rows than these counts (which is how a fully challenged scrape looks). Tune them up after a deliberate catalogue growth, never down.",
+  "_comment": "Floors used by cloudflare/scripts/prepare_release.py. Release tooling should refuse to deploy a refresh that produces fewer rows than these counts (which is how a fully challenged scrape looks). Tune them up after a deliberate catalogue growth, never down.",
 
   "min_albums": 4500,
   "min_songs": 26000,

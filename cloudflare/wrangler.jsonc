@@ -9,7 +9,7 @@
   //   npx wrangler@latest d1 execute sruthi-catalog --remote --file=data/seed.sql
   //   npx wrangler@latest deploy
   //
-  // The Worker URL is configured in GitHub Actions with VIBE_WORKER_PUBLIC_URL:
+  // Default Worker URL:
   //   https://sruthi-2o.<your-cf-subdomain>.workers.dev
   // and friends can hit it directly. No payment, no card on file.
 

@@ -7,7 +7,6 @@ Vibe 2.o is a scraper-backed Tamil music player with:
 - normalized album/song storage in a local SQLite database
 - backend-controlled playback through `/api/stream/:songId`
 - cache-backed streaming and on-demand album refresh when links go stale
-- a GitHub Actions produced library snapshot refresh flow
 
 ## Current stack
 
@@ -19,23 +18,6 @@ Vibe 2.o is a scraper-backed Tamil music player with:
 
 SQLite is used here because repeated album upserts and refresh writes were not stable enough with DuckDB under this workload.
 
-## Automated background refresh
-
-The catalog refresh producer runs in GitHub Actions on a schedule and on manual trigger.
-
-The workflow refreshes a temporary SQLite working snapshot first, validates it, builds the app, and only then publishes:
-
-- the refreshed SQLite snapshot to the `library-snapshot` GitHub Release
-- the updated manifest at `apps/api/data/library-manifest.json`
-
-Safety guarantees:
-
-- refresh runs use a temp snapshot in the Actions runner, never the live published file
-- snapshot publication happens only after refresh, validation, and build all succeed
-- DuckDB-backed validation rejects empty, corrupt, or sharply regressed snapshots
-- the workflow uses GitHub Actions concurrency protection to prevent overlapping refresh runs
-- if any step fails, the previous published manifest and snapshot stay untouched
-
 ## Project layout
 
 - [apps/api](/Users/lokesh/Sruthi%202.o/apps/api): active backend
@@ -46,8 +28,6 @@ Safety guarantees:
 - [apps/api/app/refresh.py](/Users/lokesh/Sruthi%202.o/apps/api/app/refresh.py): background snapshot refresh consumer
 - [apps/web](/Users/lokesh/Sruthi%202.o/apps/web): custom player UI
 - [apps/server](/Users/lokesh/Sruthi%202.o/apps/server): older temporary Node backend kept only for reference
-- [.github/workflows/background-refresh.yml](/Users/lokesh/Sruthi%202.o/.github/workflows/background-refresh.yml): GitHub Actions snapshot producer
-- [scripts/publish_snapshot_manifest.py](/Users/lokesh/Sruthi%202.o/scripts/publish_snapshot_manifest.py): manifest builder
 
 ## Local setup
 
@@ -123,37 +103,6 @@ The backend stream flow is:
 8. cache successful full downloads to disk
 
 ## Background snapshot refresh
-
-The app now uses a producer/consumer refresh model:
-
-- GitHub Actions is the producer
-- the running FastAPI app is the consumer
-
-### Producer
-
-The workflow in [.github/workflows/background-refresh.yml](/Users/lokesh/Sruthi%202.o/.github/workflows/background-refresh.yml):
-
-- runs daily and supports manual trigger
-- accepts:
-  - `scan_mode`
-  - `full_scan`
-  - `delay`
-  - `publish_ref`
-- downloads the currently published SQLite snapshot using `apps/api/data/library-manifest.json`
-- refreshes that downloaded DB so old shared catalog data is preserved instead of discarded
-- in `full_scan=true` mode it:
-  - walks the full paginated listing catalog
-  - walks generated movie-index alphabet and browse-by-year sections
-  - re-scrapes every known album URL already stored in the catalog so all tracks are refreshed, not just new discovery pages
-- validates the refreshed SQLite DB
-- builds the web app before publish
-- publishes:
-  - `vibe2o-library.sqlite3` to the `library-snapshot` release
-- rewrites and commits only:
-  - [apps/api/data/library-manifest.json](/Users/lokesh/Sruthi%202.o/apps/api/data/library-manifest.json)
-- retries git push using fetch + rebase if the branch moved
-
-### Consumer
 
 The backend refresh worker in [apps/api/app/refresh.py](/Users/lokesh/Sruthi%202.o/apps/api/app/refresh.py):
 

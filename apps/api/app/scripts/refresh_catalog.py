@@ -292,7 +292,7 @@ def main() -> None:
 
     # Map the CLI knobs onto the env vars the scraper / config module reads.
     # We only set env when the caller passed an explicit value, so anything
-    # already set via the workflow's `env:` block wins.
+    # already set by the caller's environment wins.
     if args.delay is not None:
         os.environ["MASSTAMILAN_DELAY_SECONDS"] = str(args.delay)
     if args.listing_delay is not None:

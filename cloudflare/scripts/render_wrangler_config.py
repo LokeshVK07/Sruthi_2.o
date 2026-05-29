@@ -4,11 +4,10 @@ Render a deploy-time copy of cloudflare/wrangler.jsonc with overrides.
 
 Why this exists:
     Wrangler resolves `main` and `assets.directory` relative to the config
-    file's location. The CI workflow renders configs into a temporary
-    `.release/` folder (so we can have one config-per-slot without cluttering
-    the repo), and that breaks the relative paths. This script fixes the
-    paths *before* writing the rendered file so wrangler always sees real
-    files no matter where the rendered config lives.
+    file's location. Deployment helpers often render configs into a temporary
+    folder, and that breaks relative paths. This script fixes the paths before
+    writing the rendered file so wrangler always sees real files no matter
+    where the rendered config lives.
 
 Usage:
     python cloudflare/scripts/render_wrangler_config.py \\
@@ -50,8 +49,7 @@ def validate_path(label: str, path_str: str, expect_dir: bool) -> None:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Render a wrangler config with overrides")
-    # `--base` is the historical flag; `--input` is the alias used by the
-    # background-refresh workflow. They're interchangeable.
+    # `--base` is the historical flag; `--input` is a friendlier alias.
     parser.add_argument("--base", "--input", dest="base", default="cloudflare/wrangler.jsonc")
     parser.add_argument("--output", required=True, help="Where to write the rendered config")
     parser.add_argument("--database-id", help="Override d1_databases[0].database_id")

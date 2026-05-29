@@ -13,7 +13,7 @@ A refresh is considered SAFE when:
 
 The script exits non-zero with a clear "Upstream challenge detected.
 Skipping unsafe deploy." message when blocking dominates the run, so the
-caller workflow can stop before mutating any deploy state.
+caller can stop before mutating any deploy state.
 """
 
 from __future__ import annotations

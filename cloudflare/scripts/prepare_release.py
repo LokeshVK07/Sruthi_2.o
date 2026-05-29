@@ -2,9 +2,9 @@
 """
 Validate the post-refresh SQLite catalogue against a baseline floor, generate
 the D1 seed file, optionally cross-check counts via DuckDB, and write a
-release manifest. Used by the background-refresh GitHub Actions workflow.
+release manifest.
 
-Usage (matches .github/workflows/background-refresh.yml):
+Usage:
 
     python cloudflare/scripts/prepare_release.py \\
         --db data/sruthi.db \\
@@ -19,8 +19,8 @@ Exit codes:
     2 — configuration / I/O error before any validation could run
 
 The script reads the floors from `release-baseline.json`. Tune that file to
-match the upstream catalogue size — the workflow refuses to deploy any
-refresh that produced fewer rows than these floors.
+match the upstream catalogue size. Release tooling should refuse to deploy
+any refresh that produced fewer rows than these floors.
 """
 
 from __future__ import annotations

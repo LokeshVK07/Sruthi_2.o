@@ -407,7 +407,7 @@ async function handleSearch(env, url) {
 // ---------------------------------------------------------------------------
 // Browser-only D1 seeder: GET /api/admin/seed
 //
-// Replaces the wrangler-CLI workflow. The user creates the D1 database in the
+// Replaces the wrangler CLI setup path. The user creates the D1 database in the
 // dashboard, pastes `cloudflare/data/schema.sql` into the D1 Console (small,
 // fits the paste limit), then visits this endpoint once. The Worker streams
 // `albums.ndjson` and `songs.ndjson` from the public GitHub raw URL and

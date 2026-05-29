@@ -324,7 +324,7 @@ class SiteScraper:
 
         `kind` selects between LISTING_DELAY_SECONDS and DETAIL_DELAY_SECONDS
         for the post-success polite delay. It also drives the listing-only
-        challenge streak counter — listing pages are the ones the workflow
+        challenge streak counter — listing pages are the ones the refresh run
         should bail out on if Cloudflare's flagging the whole crawl.
         """
         listing_kind = kind == "listing"
@@ -951,7 +951,7 @@ class SiteScraper:
                     if page_number == page_from == 1 and not reached_any_page and self.abort_on_page1_limited:
                         message = "Listing crawl aborted: page 1 remained limited after bounded retries"
                         print(
-                            "[scrape:listing] Source limited page 1 from this GitHub runner; "
+                            "[scrape:listing] Source limited page 1 from this runner; "
                             "skipping publish and preserving the current live catalog."
                         )
                         if report is not None:
