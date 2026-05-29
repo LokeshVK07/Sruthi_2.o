@@ -6,7 +6,7 @@ from typing import Any
 
 from .config import DATABASE_PATH
 from .db import ensure_database_ready, get_connection, transaction
-from .schemas import AlbumRecord, ComposerSummary, FrontendSong, PlaylistSummary, PublicSong, ScrapedAlbum, SongRecord, SongStatus
+from .schemas import AlbumRecord, ComposerSummary, FrontendSong, PlaylistSummary, PublicSong, ScrapedAlbum, ScrapedSong, SongRecord, SongStatus
 from .utils import canonicalize_url, deterministic_id, now_utc, slugify
 
 
@@ -79,6 +79,11 @@ def list_album_urls() -> list[str]:
         ORDER BY updated_at DESC, album_name ASC
         """
     ).fetchall()
+    return [str(row[0]) for row in rows]
+
+
+def list_processed_album_urls() -> list[str]:
+    rows = get_connection().execute("SELECT album_url FROM albums ORDER BY album_url").fetchall()
     return [str(row[0]) for row in rows]
 
 
@@ -231,6 +236,110 @@ def upsert_album_details(album: ScrapedAlbum) -> AlbumUpsertResult:
 def upsert_album(album: ScrapedAlbum) -> tuple[bool, int]:
     result = upsert_album_details(album)
     return result.album_is_new, result.songs_seen
+
+
+def _int_or_none(value: Any) -> int | None:
+    try:
+        if value in (None, ""):
+            return None
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _direct_track_url(track: dict[str, Any], bitrate: int) -> str | None:
+    explicit = track.get(f"audio{bitrate}Url")
+    if explicit:
+        return str(explicit)
+    for link in track.get("downloadLinks") or []:
+        if not isinstance(link, dict):
+            continue
+        if _int_or_none(link.get("bitrate")) == bitrate and link.get("url"):
+            return str(link["url"])
+    return None
+
+
+def _direct_export_album(payload: dict[str, Any]) -> ScrapedAlbum | None:
+    album_url = str(payload.get("url") or "").strip()
+    album_name = str(payload.get("title") or "").strip()
+    tracks = payload.get("tracks") or []
+    if not album_url or not album_name or not isinstance(tracks, list):
+        return None
+
+    album_image = str(payload.get("imageUrl") or "").strip() or None
+    songs: list[ScrapedSong] = []
+    for index, track in enumerate(tracks, start=1):
+        if not isinstance(track, dict):
+            continue
+        title = str(track.get("title") or "").strip()
+        if not title:
+            continue
+        track_image = str(track.get("imageUrl") or "").strip() or album_image
+        url_128 = _direct_track_url(track, 128)
+        url_320 = _direct_track_url(track, 320) or str(track.get("audioUrl") or "").strip() or None
+        songs.append(
+            ScrapedSong(
+                track_name=title,
+                track_number=_int_or_none(track.get("trackNumber")) or index,
+                singers=str(track.get("singers") or track.get("artist") or "").strip() or None,
+                image_url=track_image,
+                url_128kbps=url_128,
+                url_320kbps=url_320,
+            )
+        )
+
+    if not songs:
+        return None
+
+    if not album_image:
+        album_image = next((song.image_url for song in songs if song.image_url), None)
+
+    return ScrapedAlbum(
+        album_url=album_url,
+        album_id=make_album_id(album_url, album_name),
+        album_name=album_name,
+        year=_int_or_none(payload.get("year")),
+        music_director=str(payload.get("musicDirector") or payload.get("composer") or "").strip() or None,
+        singers_summary=str(payload.get("starring") or "").strip() or None,
+        image_url=album_image,
+        language=None,
+        songs=songs,
+    )
+
+
+def upsert_direct_export_albums(albums: list[dict[str, Any]]) -> dict[str, Any]:
+    imported = 0
+    skipped = 0
+    songs_seen = 0
+    for payload in albums:
+        album = _direct_export_album(payload)
+        if album is None:
+            skipped += 1
+            continue
+        result = upsert_album_details(album)
+        imported += 1
+        songs_seen += result.songs_seen
+
+    return {
+        "importedAlbums": imported,
+        "skippedAlbums": skipped,
+        "importedTracks": songs_seen,
+        "savedAlbums": count_albums(),
+        "savedTracks": count_songs(),
+        "updatedAt": now_utc(),
+    }
+
+
+def reset_scraped_catalog() -> dict[str, Any]:
+    with transaction() as tx:
+        tx.execute("DELETE FROM favorites")
+        tx.execute("DELETE FROM recently_played")
+        tx.execute("DELETE FROM playlist_songs")
+        tx.execute("DELETE FROM songs")
+        tx.execute("DELETE FROM albums")
+        tx.execute("DELETE FROM scrape_runs")
+        tx.execute("DELETE FROM songs_fts")
+    return {"savedAlbums": 0, "savedTracks": 0, "updatedAt": now_utc()}
 
 
 def _favorite_song_ids(user_id: str = DEFAULT_USER_ID) -> set[str]:

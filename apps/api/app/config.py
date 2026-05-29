@@ -23,8 +23,8 @@ SNAPSHOT_CACHE_PATH = Path(os.getenv("SNAPSHOT_CACHE_PATH", str(REFRESH_STATE_DI
 LOCAL_REFRESH_MANIFEST_PATH = Path(
     os.getenv("LOCAL_REFRESH_MANIFEST_PATH", str(REFRESH_STATE_DIR / "library-manifest.local.json"))
 )
-DEFAULT_REFRESH_MANIFEST_URL = "https://raw.githubusercontent.com/LokeshVK07/Sruthi_2.o/main/apps/api/data/library-manifest.json"
-REFRESH_ENABLED = os.getenv("REFRESH_ENABLED", "true").strip().lower() not in {"0", "false", "no", "off"}
+DEFAULT_REFRESH_MANIFEST_URL = ""
+REFRESH_ENABLED = os.getenv("REFRESH_ENABLED", "false").strip().lower() not in {"0", "false", "no", "off"}
 REFRESH_MANIFEST_URL = os.getenv("REFRESH_MANIFEST_URL", DEFAULT_REFRESH_MANIFEST_URL).strip()
 REFRESH_INTERVAL_SECONDS = int(os.getenv("REFRESH_INTERVAL_SECONDS", "1800"))
 REFRESH_TIMEOUT_SECONDS = float(os.getenv("REFRESH_TIMEOUT_SECONDS", "60"))

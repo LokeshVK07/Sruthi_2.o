@@ -2,13 +2,9 @@
 """
 Convenience launcher for the local Vibe 2.o FastAPI server.
 
-This file mirrors `npm --workspace @melodify/api run dev` so anyone (or any
-CI step) running `python server.py` from the repo root gets the same API
-that's running on http://localhost:4000 during development.
-
-The background-refresh workflow lists this file under "required_files" so
-its presence indicates a sane checkout; the workflow itself doesn't invoke
-it (CI doesn't need a local web server to deploy the Cloudflare Worker).
+This file mirrors `npm --workspace @melodify/api run dev` so running
+`python server.py` from the repo root starts the same API on
+http://localhost:4000 during development.
 """
 
 from __future__ import annotations

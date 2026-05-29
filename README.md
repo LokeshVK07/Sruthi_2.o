@@ -79,6 +79,26 @@ The implemented scraper:
 - keeps deterministic song ids from `album_url + track_number`
 - refreshes album metadata again if playback finds a stale link
 
+### Browser Verified Rescrape
+
+For the Project_1-style scrape path, run the local API and paste
+[tools/masstamilan-direct-export.js](/Users/lokesh/Sruthi%202.o/tools/masstamilan-direct-export.js)
+into a verified MassTamilan browser tab:
+
+1. Start the local API:
+
+```bash
+npm --workspace @melodify/api run dev
+```
+
+2. Open [https://www.masstamilan.dev/tamil-songs?page=1](https://www.masstamilan.dev/tamil-songs?page=1).
+3. Complete any browser/Cloudflare check.
+4. Open DevTools Console and paste the script.
+
+The script sends albums directly to `http://127.0.0.1:4000/api/catalog/batch`.
+Use `POST http://127.0.0.1:4000/api/catalog/reset` when you want to clear the
+local scraped catalogue before starting again.
+
 ### Source-site limitation
 
 `masstamilan.dev` still intermittently serves Cloudflare or challenge pages on some album or track-detail requests. The scraper now stores successful albums reliably and skips failures without corrupting the database, but a true 100% scrape still depends on how often the source allows those requests through.

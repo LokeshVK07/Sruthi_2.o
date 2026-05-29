@@ -38,12 +38,15 @@ from .repository import (
     next_songs_for_prefetch,
     recent_for_warmup,
     record_recently_played,
+    reset_scraped_catalog,
     search_albums,
     search_artists,
     search_composers,
     search_frontend_songs,
     search_songs,
     toggle_favorite,
+    list_processed_album_urls,
+    upsert_direct_export_albums,
 )
 from .scraper import site_scraper
 
@@ -51,7 +54,13 @@ from .scraper import site_scraper
 app = FastAPI(title="Vibe 2.o API")
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[WEB_ORIGIN, "http://127.0.0.1:5173", "http://localhost:5173"],
+    allow_origins=[
+        WEB_ORIGIN,
+        "http://127.0.0.1:5173",
+        "http://localhost:5173",
+        "https://www.masstamilan.dev",
+        "https://masstamilan.dev",
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -203,6 +212,25 @@ def recently_played(song_id: str):
     if not record_recently_played(song_id):
         raise HTTPException(404, "Song not found")
     return {"ok": True}
+
+
+@app.get("/api/processed")
+def processed_album_urls():
+    return {"processedUrls": list_processed_album_urls()}
+
+
+@app.post("/api/catalog/batch")
+async def catalog_batch(request: Request):
+    payload = await request.json()
+    albums = payload.get("albums") if isinstance(payload, dict) else None
+    if not isinstance(albums, list):
+        raise HTTPException(400, "albums must be an array")
+    return upsert_direct_export_albums(albums)
+
+
+@app.post("/api/catalog/reset")
+def catalog_reset():
+    return reset_scraped_catalog()
 
 
 @app.post("/api/admin/scrape")

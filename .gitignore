@@ -20,6 +20,9 @@ apps/web/vite.config.js
 
 apps/api/.cache/
 apps/api/full_scrape.log
+apps/api/data/library-manifest.json
+apps/api/data/melodify.duckdb
+apps/api/data/melodify.snapshot-backup.sqlite3
 
 apps/server/data
 apps/server/cache
